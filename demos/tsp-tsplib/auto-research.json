@@ -1,0 +1,13 @@
+{
+  "description": "Design a Traveling-Salesman heuristic on the REAL TSPLIB benchmark (berlin52, eil51, eil76, kroA100, ch150 — classic instances with published optimal tour lengths).",
+  "modifiable_files": [
+    "src/solve.py"
+  ],
+  "read_only_files": [
+    "src/evaluate.py",
+    "src/pyproject.toml"
+  ],
+  "evaluation_command": "cd src && uv run evaluate.py > ../run.log 2>&1",
+  "metric_name": "gap_pct",
+  "metric_direction": "lower_is_better"
+}

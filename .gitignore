@@ -1,0 +1,51 @@
+# ─── Secrets & local environment ───────────────────────────────
+# Never commit credentials or environment-specific config.
+.env
+.env.*
+.env.local
+!.env.example
+*.pem
+*.key
+
+# ─── Node / React / Vite (user-interface) ──────────────────────
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ─── Python (infrastructure CDK, lambda) ───────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+
+# ─── AWS CDK (infrastructure) ──────────────────────────────────
+cdk.out/
+.cdk.staging/
+# cdk.context.json caches account/region lookups; ignored here to keep
+# account-specific values out of the repo.
+cdk.context.json
+
+# ─── OS / editor cruft ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+*.bkp
+
+# ─── Generated: create_project Lambda seed (built by scripts/package_lambdas.sh) ───
+infrastructure/lambda/create_project/seed/

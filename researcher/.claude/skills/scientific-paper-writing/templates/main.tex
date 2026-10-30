@@ -1,0 +1,80 @@
+% Auto-Research paper scaffold — IEEE conference format (IEEEtran, vendored in this skill under LPPL).
+% Fill every section from the wiki, the experiments ledger, the status report, and the code. Report
+% only real numbers (from the ledger); cite only real sources (from the wiki).
+%
+% setup-latex.sh copies IEEEtran.cls + IEEEtran.bst next to this file so it builds offline.
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{url}
+\usepackage{hyperref}
+\graphicspath{{figures/}}
+
+\begin{document}
+
+\title{TODO: Paper title --- the problem and the headline result}
+
+\author{\IEEEauthorblockN{AI Researcher}
+\IEEEauthorblockA{Auto-Research \\ \texttt{auto-research}}}
+
+\maketitle
+
+\begin{abstract}
+% 4--6 sentences: the problem, the approach, and the headline result (the best metric_name value).
+TODO
+\end{abstract}
+
+\begin{IEEEkeywords}
+TODO, keywords, from, the, wiki
+\end{IEEEkeywords}
+
+\section{Introduction}
+% Motivation, the research question, and the contributions. Ground it in the wiki and report/status.md.
+TODO
+
+\section{Related Work}
+% Synthesize the wiki's \#literature pages. Cite real sources with \cite{...} keys defined in refs.bib
+% (build refs.bib from ~/workspace/wiki/raw/papers.db.jsonl via jsonl_to_bibtex.py).
+TODO
+
+\section{Method}
+% The approach that produced the best result (describe the code on \texttt{main}, not the dead ends).
+TODO
+
+\section{Experimental Setup}
+% Dataset, evaluation\_command, metric (metric\_name / direction), compute (worker instance type),
+% and per-run time/budget. All from auto-research.json and the ledger.
+TODO
+
+\section{Results}
+% A table built FROM THE LEDGER (one row per notable experiment: the change vs the measured metric),
+% plus figures. Numbers MUST match the experiments ledger.
+\begin{table}[t]
+  \centering
+  \caption{TODO: results --- experiment vs.\ measured metric.}
+  \begin{tabular}{lr}
+    \toprule
+    Experiment & Metric \\
+    \midrule
+    Baseline & TODO \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% Example figure (a generator writes figures/kl_progress.png at build time):
+% \begin{figure}[t]\centering\includegraphics[width=\linewidth]{kl_progress.png}
+%   \caption{TODO}\end{figure}
+
+\section{Conclusion}
+% Transferable takeaways (mirror the wiki's \#lesson pages) and limitations.
+TODO
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
