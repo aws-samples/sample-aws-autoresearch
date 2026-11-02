@@ -19,6 +19,12 @@ the web app.
 
 ---
 
+## Demo Video
+
+[![Demo Video](https://img.youtube.com/vi/t7iofpx9W6w/0.jpg)](https://youtu.be/t7iofpx9W6w)
+
+---
+
 ## When does the AI Researcher fit a problem?
 
 Two things must be true:
