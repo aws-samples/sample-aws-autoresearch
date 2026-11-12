@@ -28,12 +28,12 @@ Each prints what it did, validates its inputs, and is safe to re-run; pass `--he
 | `aws-research step list-experiments [state]` | print list of the past experiments |
 | `aws-research step pull-context` | orient: workers/N, best, spend/budget, recent experiments |
 | `aws-research step guidance {list\|done <id>}` | read / clear the human guidance inbox |
-| `aws-research step update-project best_metric <value>` | record the new best metric (`status` & `spent_usd` are loop-managed — don't set them; progress notes go in `report/status.md`) |
+| `aws-research step update-project best_metric <value>` | record the new best metric (`status` is loop-managed and the spend fields are metered automatically — don't set them; progress notes go in `report/status.md`) |
 | `aws-research step experiment-branch <EXP_ID>` | branch experiment/`EXP_ID` from the current best `main` |
 | `aws-research step experiment-push <EXP_ID> "<hyp>"` | commit + push that branch, return to `main` |
 | `aws-research step create-experiment <EXP_ID> <WORKER_ID> "<hyp>" "<change>"` | create the ledger record (state `running`) |
 | `aws-research step dispatch-experiments <EXP_ID> <WORKER_ID> …` | run all experiments concurrently; prints result array |
-| `aws-research step finalize-experiment <state> '<result_json>'` | write an experiment's terminal record (cost read from the result; auto-prunes the checkpoint if `discarded`/`crashed`) |
+| `aws-research step finalize-experiment <state> '<result_json>'` | write an experiment's terminal record (auto-prunes the checkpoint if `discarded`/`crashed`; cost fields are already metered and are not taken from the JSON) |
 | `aws-research step keep-best <EXP_ID> <best_metric> "<msg>"` | merge the winner into `main`, record best |
 
 ## Cost model — GPUs are OFF unless an experiment is running
@@ -45,6 +45,11 @@ mode there are no workers — experiments run on this (GPU) researcher instance 
 `run-local-experiment` sub-agent, and `aws-research step pull-context` reports a single slot (`WORKERS=local`,
 `N_WORKERS=1`). Either way you drive experiments the same: design N (= `N_WORKERS`), then dispatch.
 Steps 1–5 (sync, guidance, knowledge acquisition, design, implement) are just reasoning/editing.
+
+**Spend is metered automatically** and counts against the project budget: your own Claude usage
+(and every sub-agent's), the researcher instance's running time, and each worker's running time.
+`pull-context` prints `SPENT_USD`/`BUDGET_USD` and the breakdown. Your Claude usage is usually the
+largest item — keep knowledge acquisition focused rather than exhaustive when the budget is tight.
 
 ## Durable artifacts in S3
 
@@ -143,8 +148,9 @@ echo "$RESULTS"
 ```
 
 Each result object has: `experiment_id`, `metric_value`, `peak_vram_mb`, `status` (the sub-agent's
-verdict), `run_seconds`, `worker_uptime_seconds`, `cost_usd` (GPU cost, computed from uptime),
-`run_log_s3_uri`, `log_stream`, `agent_log_s3_uri`, `notes`.
+verdict), `run_seconds`, `worker_uptime_seconds` (measured from EC2), `worker_cost_usd`,
+`agent_cost_usd` (the sub-agent's Claude usage), `cost_usd` (their sum — all metered, already in the
+ledger), `run_log_s3_uri`, `log_stream`, `agent_log_s3_uri`, `notes`.
 
 ## 7. Analyze — compare all N, keep the single best
 Read `metric_direction` and the current `best_metric`. Classify each of the N results as `kept`/`discarded`/`crashed` (crash = no metric; discard = ran but didn't beat best, or a tiny gain for a lot of ugly complexity; candidate = strictly better than best).

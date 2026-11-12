@@ -26,7 +26,7 @@ reads the env above and targets the worker automatically. Each is safe to re-run
 | `aws-research runner run-eval` | run `evaluation_command` on the worker to completion, then read `metrics.json` |
 | `aws-research runner push-branch` | push the worker's exact code to `origin/$BRANCH` + archive `run.log` to S3 |
 | `aws-research runner collect-artifacts [checkpoint]` | upload benchmarks (and, if given, the checkpoint) to S3 |
-| `aws-research runner write-result <status> <metric> <vram> <run_s> "<notes>" --uptime <uptime_s>` | write the final JSON to `$RESULT_FILE` |
+| `aws-research runner write-result <status> <metric> <vram> <run_s> "<notes>"` | write the final JSON to `$RESULT_FILE` |
 
 `aws-research runner exec "<cmd>"` is the single door to the worker: use it for every remote step —
 readiness checks, debugging, remote git, remote uploads.
@@ -107,9 +107,11 @@ aws-research runner finalize
 ## 7. REPORT
 Write your final result JSON to `$RESULT_FILE`:
 ```bash
-aws-research runner write-result "<status>" "<metric|null>" "<vram|null>" <run_seconds> "<1-2 sentences: what happened, any debugging done>" --uptime <worker_uptime_seconds>
+aws-research runner write-result "<status>" "<metric|null>" "<vram|null>" <run_seconds> "<1-2 sentences: what happened, any debugging done>"
 ```
 Decide `status`: `keep` if the metric improved vs the current best on `main` (per `metric_direction`);
 `discard` if it ran but did not improve; `crash` if it never produced a metric. The dispatch wrapper
-adds `log_stream` and `agent_log_s3_uri` for you. The main agent makes the final keep/merge decision
-— you just report the run outcome.
+adds `log_stream`, `agent_log_s3_uri` and the **metered** cost (worker running time measured from
+EC2 + your own Claude usage) for you — do not report or estimate cost or uptime yourself. Every
+minute the worker is on is billed, so stop it as soon as the run's artifacts are safe. The main agent
+makes the final keep/merge decision — you just report the run outcome.

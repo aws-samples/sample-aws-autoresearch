@@ -50,13 +50,24 @@ def test_experiment_item():
                   "log_stream": "experiment/step-1-a", "created_at": "NOW"}
 
 
-def test_finalize_updates_drops_nulls():
+def test_finalize_updates_drops_nulls_and_cost():
     r = {"experiment_id": "e", "metric_value": "0.5", "peak_vram_mb": None, "cost_usd": "0.02",
-         "run_seconds": 120, "log_stream": "experiment/e"}
+         "worker_uptime_seconds": 900, "agent_cost_usd": "1.0", "run_seconds": 120,
+         "log_stream": "experiment/e"}
     u = step.finalize_updates(r, "kept", "NOW")
-    assert u["state"] == "kept" and u["metric_value"] == "0.5" and u["cost_usd"] == "0.02"
+    assert u["state"] == "kept" and u["metric_value"] == "0.5"
     assert u["completed_at"] == "NOW" and u["run_seconds"] == 120
     assert "peak_vram_mb" not in u and "agent_log_s3_uri" not in u   # nulls dropped
+    # cost is metered by dispatch — never copied from the (LLM-relayed) result JSON
+    assert not {"cost_usd", "worker_uptime_seconds", "agent_cost_usd"} & set(u)
+
+
+def test_update_project_refuses_spend_fields(s):
+    c = FakeClient()
+    for f in ("spent_usd", "researcher_cost_usd", "claude_cost_usd", "worker_cost_usd"):
+        with pytest.raises(RuntimeError):
+            step.update_project(c, s, f, "0")
+    assert not c.calls
 
 
 def test_update_project_status_guard(s):

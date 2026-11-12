@@ -33,11 +33,19 @@ def ssm(region: str):
 
 
 def instance_state(region: str, instance_id: str) -> str:
+    return instance_state_and_launch(region, instance_id)[0]
+
+
+def instance_state_and_launch(region: str, instance_id: str) -> tuple[str, float | None]:
+    """(state, LaunchTime epoch). EC2 resets LaunchTime on every start, so it marks the start of the
+    current running period. ("unknown", None) on error."""
     try:
         r = ec2(region).describe_instances(InstanceIds=[instance_id])
-        return r["Reservations"][0]["Instances"][0]["State"]["Name"]
+        inst = r["Reservations"][0]["Instances"][0]
+        lt = inst.get("LaunchTime")
+        return inst["State"]["Name"], (lt.timestamp() if lt else None)
     except (ClientError, IndexError, KeyError):
-        return "unknown"
+        return "unknown", None
 
 
 def instance_private_ip(region: str, instance_id: str) -> str | None:
@@ -55,12 +63,14 @@ def start_instance(region: str, instance_id: str) -> None:
         raise
 
 
-def stop_instance(region: str, instance_id: str) -> None:
-    """Stop the instance (idempotent — errors swallowed)."""
+def stop_instance(region: str, instance_id: str) -> bool:
+    """Stop the instance. Idempotent; returns False (never raises) if the API call failed."""
     try:
         ec2(region).stop_instances(InstanceIds=[instance_id])
-    except ClientError:
-        pass
+        return True
+    except ClientError as e:
+        print(f"[aws] stop_instances({instance_id}) failed: {e}", flush=True)
+        return False
 
 
 def wait_state(region: str, instance_id: str, target: str, timeout_s: int, poll_s: int = 10,

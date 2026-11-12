@@ -80,7 +80,7 @@ class ApiStack(Stack):
             "AuthzLayer",
             code=_lambda.Code.from_asset("lambda_layers/authz"),
             compatible_runtimes=[_lambda.Runtime.PYTHON_3_13],
-            description="Per-project authorization helpers (ar_authz).",
+            description="Per-project authorization helpers (ar_authz) + region-aware EC2 rates (ar_pricing).",
         )
 
         def make_fn(name: str, timeout: int = 30, extra_env: dict | None = None) -> _lambda.Function:
@@ -374,6 +374,11 @@ class ApiStack(Stack):
         projects_table.grant_read_write_data(fn_agent_api)
         experiments_table.grant_read_write_data(fn_agent_api)
         guidance_table.grant_read_write_data(fn_agent_api)
+
+        # Region-correct EC2 rates for cost metering (ar_pricing). The Price List API has no
+        # resource-level permissions, so "*" is required; it is read-only public pricing data.
+        for fn in (fn_create_project, fn_agent_api):
+            fn.add_to_role_policy(iam.PolicyStatement(actions=["pricing:GetProducts"], resources=["*"]))
 
         # --- get_workers: live per-worker EC2 power state for the dashboard [read] ---
         fn_get_workers = make_fn("get_workers")

@@ -1,4 +1,5 @@
-"""Budget / patience / spend — pure functions (were jq/awk in researcher-loop.sh)."""
+"""Budget / patience — pure functions. Spend itself is METERED by agent_api (see costs.py and
+instance-meter.sh); nothing here computes cost."""
 
 from __future__ import annotations
 
@@ -14,15 +15,19 @@ def _f(v, default: float = 0.0) -> float:
         return default
 
 
-def budget_state(spent, budget) -> str:
-    """'OVER' iff a positive budget has been reached; else 'OK'. (blank/<=0 budget = no cap)."""
+def budget_state(spent, budget, reserve=0.0) -> str:
+    """'OVER' iff a positive budget has been reached (keeping `reserve` back, e.g. for the paper);
+    else 'OK'. (blank/<=0 budget = no cap)."""
     s, b = _f(spent), _f(budget)
-    return "OVER" if (b > 0 and s >= b) else "OK"
+    return "OVER" if (b > 0 and s + max(0.0, _f(reserve)) >= b) else "OK"
 
 
-def ledger_cost(experiments: list[dict]) -> float:
-    """Sum of per-experiment cost_usd (0 in local mode; worker cost in ec2 mode)."""
-    return round(sum(_f(e.get("cost_usd")) for e in experiments or []), 4)
+def remaining_usd(spent, budget, reserve=0.0) -> float | None:
+    """Budget left for new work (None = no cap)."""
+    b = _f(budget)
+    if b <= 0:
+        return None
+    return max(0.0, b - _f(spent) - max(0.0, _f(reserve)))
 
 
 def steps_since_last_keep(experiments: list[dict]) -> int:
@@ -47,7 +52,3 @@ def steps_since_last_keep(experiments: list[dict]) -> int:
             break
         n += 1
     return n
-
-
-def step_cost(seconds: float, hourly_rate: float) -> float:
-    return round(max(0.0, float(seconds)) / 3600.0 * float(hourly_rate), 4)

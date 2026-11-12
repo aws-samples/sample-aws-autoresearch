@@ -3,7 +3,7 @@
 The steps (sync_code / run_eval / exec / push_branch / collect_artifacts / write_result) are
 backend-agnostic: they issue shell commands in the project code dir via `self.backend`, so ec2 (SSH)
 and local (subprocess) share ONE code path. Subclasses provide the backend + the mode-specific hooks
-(`prepare`, `finalize`, `_cost`) and capability flags.
+(`prepare`, `finalize`) and capability flags. Cost is NOT a runner concern: the dispatcher meters it.
 """
 
 from __future__ import annotations
@@ -58,10 +58,6 @@ class ExperimentRunner(ABC):
     @abstractmethod
     def finalize(self) -> None:
         """Guaranteed cleanup (ec2: stop worker; local: no-op)."""
-
-    @abstractmethod
-    def _cost(self, run_seconds: int, uptime_seconds: int) -> tuple[float, int]:
-        """Return (cost_usd, worker_uptime_seconds_to_record)."""
 
     # --- shared steps ------------------------------------------------------------
     def _eval_command(self) -> str:
@@ -140,22 +136,19 @@ class ExperimentRunner(ABC):
         print(f"artifact collection done for {exp}")
 
     def write_result(self, status: str, metric: str | None, vram: str | None,
-                     run_seconds: int, uptime_seconds: int = 0, notes: str = "") -> RunResult:
-        cost, uptime_rec = self._cost(run_seconds, uptime_seconds)
+                     run_seconds: int, notes: str = "") -> RunResult:
         res = RunResult(
             experiment_id=self.s.exp_id,
             status=status,
             metric=_norm(metric),
             peak_vram_mb=_norm(vram),
             run_seconds=int(run_seconds),
-            worker_uptime_seconds=uptime_rec,
-            cost_usd=cost,
             run_log_s3_uri=f"{self._s3()}/experiments/{self.s.exp_id}/run.log",
             notes=notes,
         )
         if self.s.result_file:
             with open(self.s.result_file, "w") as f:
                 f.write(res.to_json())
-        print(f"wrote result for {self.s.exp_id} ({self.name}; cost=${cost:.4f})")
+        print(f"wrote result for {self.s.exp_id} ({self.name}; cost is metered by the dispatcher)")
         print(res.to_json())
         return res

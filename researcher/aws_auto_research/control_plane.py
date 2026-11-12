@@ -33,7 +33,12 @@ class Project(BaseModel):
     # loop fields (stored as strings in the record)
     budget_usd: str = "0"
     spent_usd: str = "0"
+    # metered spend breakdown (spent_usd = claude + researcher + worker; written only by agent_api metering)
+    claude_cost_usd: str = "0"
     researcher_cost_usd: str = "0"
+    worker_cost_usd: str = "0"
+    worker_hourly_usd: str = ""
+    model: str = ""
     patience: str = "10"
     experiment_timeout_minutes: int = 15
     write_paper: bool = False
@@ -97,3 +102,17 @@ class ControlPlaneClient:
     def mark_guidance_processed(self, project_id: str, guidance_id: str) -> dict:
         return self._invoke({"action": "mark_guidance_processed", "project_id": project_id,
                              "guidance_id": guidance_id})
+
+    # --- cost metering (agent_api is the only writer of spend; all calls are retry-safe) --------
+    def meter_claude(self, project_id: str, invocation_id: str, cumulative_usd: float,
+                     experiment_id: str | None = None) -> dict:
+        payload = {"action": "meter_claude", "project_id": project_id,
+                   "invocation_id": invocation_id, "cumulative_usd": f"{cumulative_usd:.6f}"}
+        if experiment_id:
+            payload["experiment_id"] = experiment_id
+        return self._invoke(payload)
+
+    def record_worker_usage(self, project_id: str, experiment_id: str, seconds: int, run_id: str) -> dict:
+        return self._invoke({"action": "record_worker_usage", "project_id": project_id,
+                             "experiment_id": experiment_id, "worker_uptime_seconds": int(seconds),
+                             "run_id": run_id})

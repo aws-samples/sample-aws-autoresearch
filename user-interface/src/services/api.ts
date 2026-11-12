@@ -75,6 +75,10 @@ export interface Project {
   write_paper?: boolean; // when true, the researcher writes a paper when research completes
   paper_pdf_s3_uri?: string; // set once the paper PDF has been built + uploaded (reveals the Paper tab)
   spent_usd?: number | string;
+  // Metered spend breakdown — spent_usd = claude + researcher + worker (written only by agent_api).
+  claude_cost_usd?: number | string;
+  researcher_cost_usd?: number | string;
+  worker_cost_usd?: number | string;
   created_at?: string;
   // Async provisioning progress (status === 'provisioning' | 'provision_failed').
   provisioning_state?: string; // queued|creating-repos|committing|resolving-amis|creating-researcher|creating-workers|done|failed
@@ -101,7 +105,9 @@ export interface Experiment {
   peak_vram_mb?: number | string;
   run_seconds?: number;
   worker_uptime_seconds?: number;
-  cost_usd?: number;
+  cost_usd?: number | string; // agent_cost_usd + worker_cost_usd (metered)
+  agent_cost_usd?: number | string; // the run-experiment sub-agent's Claude usage
+  worker_cost_usd?: number | string; // GPU worker running time attributed to this experiment
   created_at?: string;
   completed_at?: string;
   // Observability: each sub-agent writes its own tailable stream + S3 archives.

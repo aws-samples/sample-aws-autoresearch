@@ -86,4 +86,5 @@ aws-research runner write-result "<status>" "<metric|null>" "<vram|null>" <run_s
 ```
 Decide `status`: `keep` if the metric improved vs the current best on `main` (per `metric_direction`);
 `discard` if it ran but did not improve; `crash` if it never produced a metric. The dispatch wrapper
-adds `log_stream` and `agent_log_s3_uri`. The main agent makes the final keep/merge decision.
+adds `log_stream`, `agent_log_s3_uri` and the metered cost (do not report cost yourself). The main
+agent makes the final keep/merge decision.

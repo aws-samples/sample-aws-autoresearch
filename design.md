@@ -226,6 +226,49 @@ Cost is capped **per user**. Each user has a **budget** — a spendable USD bala
   set any user's budget. Regular users can only read their own. This is separate from the per-project
   owner/admin model. Editing is done through the `users` Lambda (§4).
 
+### Cost metering
+
+A project's `spent_usd` is the sum of three metered totals on the project record, and nothing else:
+
+| total | what | measured by |
+|---|---|---|
+| `claude_cost_usd` | every `claude -p` (research steps, experiment sub-agents, the paper) | `costs.ClaudeCostMeter`: prices the stream-json token usage (cumulative `modelUsage` on `result`; per-message `usage` before that, so a killed/timed-out run is still charged) at Bedrock list price × 1.10 for geographic / in-region inference profiles (`global.` = 1.0; override with `BEDROCK_PRICE_MULTIPLIER`) |
+| `researcher_cost_usd` | the researcher instance's running time | `instance-meter.sh` on the researcher (its own systemd unit, from the EC2 `LaunchTime` of each start — boot included — until shutdown) |
+| `worker_cost_usd` | every worker's running time | `instance-meter.sh` on each worker — covers the provisioning boot, debug loops, timeouts and any worker left running, whoever started it |
+
+Invariants:
+- **Metered in code, never self-reported by an agent.** The totals change only through the `agent_api`
+  metering actions (`meter_instance`, `meter_claude`); `spent_usd` and the totals are not in
+  `PROJECT_WRITABLE`, and agent writes to experiment cost fields are dropped.
+- **Monotonic and retry-safe.** `meter_instance` takes an absolute `[start, end]` interval and
+  charges only beyond the instance's high-water mark; `meter_claude` takes an invocation's cumulative
+  USD and charges only the increase. Duplicated, retried or overlapping reports never double-charge;
+  concurrent meters use optimistic concurrency (`cost_version`) and never lose an increment.
+- **Region-correct rates.** EC2 on-demand $/h for the deploy region comes from the Price List API at
+  project creation and is cached on the record (`researcher_hourly_usd`, `worker_hourly_usd`,
+  `*_rate_source`); legacy records are resolved on first use. A fallback rate (Pricing API down) is
+  used for that charge only and never cached, so the next charge retries the Pricing API.
+- **Per-experiment cost is attribution.** `dispatch` records the sub-agent's Claude cost
+  (`agent_cost_usd`) and the worker's running time during the experiment measured from EC2 state
+  (`worker_uptime_seconds`, `worker_cost_usd`); `cost_usd` is their sum. Each dispatch is its own run
+  id, so a re-dispatched experiment accumulates both runs. The project's worker total is the
+  per-instance meter, which also includes time outside experiments (e.g. the provisioning boot).
+- **Per-iteration record.** After every research step the loop appends the deltas of all three totals
+  (plus the step's own Claude cost and wall time) to `{s3_data}/logs/step-costs.jsonl`.
+- **Budget enforcement.** The loop stops when `spent + paper reserve ≥ budget_usd` (reserve =
+  `PAPER_BUDGET_USD`, at most 20% of the budget), and every `claude -p` gets `--max-budget-usd =
+  min(configured cap, remaining)` (sub-agents split the remainder; nothing starts below $0.05),
+  converted to list prices because Claude Code enforces that cap at list price. Caps are set when each
+  invocation starts, so concurrent invocations can overshoot by at most their combined caps; worker
+  time is bounded by the experiment timeout, not by the budget.
+- **Interim Claude estimate.** Until a `result` event arrives, cost is estimated from streamed usage,
+  floored by emitted content size; on 38 real invocations this is 93–97% of the exact final cost and
+  never above it, so a killed run is charged for nearly everything it used.
+- **Watchdog.** Each worker boot arms a systemd timer that stops the worker after
+  `max(90, experiment_timeout_minutes + 30)` minutes (240 on the first, provisioning boot).
+- **Loss bound.** A hard stop loses at most one meter tick (~60 s) of instance time and ≤60 s of
+  un-flushed Claude usage. Not metered: EBS storage, S3, CloudWatch, data transfer.
+
 ---
 
 ## 2. Repository map — where to make a change

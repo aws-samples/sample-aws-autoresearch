@@ -36,10 +36,40 @@ log() {
         --log-events "[{\"timestamp\":$ts,\"message\":$msg}]" --region "$AWS_REGION" >/dev/null 2>&1 || true
 }
 
+# --- Cost metering: this worker's running time → the project's worker_cost_usd (every boot). ---
+# A separate transient unit (not a child of this script): when this boot script exits, systemd
+# tears down the boot unit's cgroup, which would kill a plain background process.
+systemd-run --unit=ar-instance-meter --collect -p After=network-online.target -p Wants=network-online.target \
+    -p Restart=on-failure -p RestartSec=30 \
+    --setenv=AWS_REGION="$AWS_REGION" /bin/bash "$HOME_DIR/.auto-research/instance-meter.sh" >/dev/null 2>&1 \
+    || log "WARNING: could not start the instance cost meter (already running?)"
+
 # --- Runaway-cost backstop: self-stop after N minutes even if the sub-agent dies. ---
+# N must exceed the project's hard per-experiment timeout (the dispatcher kills the sub-agent and
+# stops the worker at that point), so a legitimate long experiment is never cut short by it.
+EXP_TIMEOUT_MIN=$(
+  TOK=$(aws ssm get-parameter --name "/auto-research/projects/$PROJECT_ID/agent-token" --with-decryption \
+        --region "$AWS_REGION" --query Parameter.Value --output text 2>/dev/null || true)
+  OUTF=$(mktemp)
+  python3 -c 'import json,sys; print(json.dumps({"action":"get_project","project_id":sys.argv[1],"_token":sys.argv[2]}))' \
+      "$PROJECT_ID" "$TOK" > "$OUTF.req" 2>/dev/null || true
+  aws lambda invoke --function-name AutoResearch-agent_api --region "$AWS_REGION" --cli-binary-format raw-in-base64-out \
+      --payload "file://$OUTF.req" "$OUTF" >/dev/null 2>&1 || true
+  python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["project"].get("experiment_timeout_minutes") or 0))' \
+      "$OUTF" 2>/dev/null || echo 0
+  rm -f "$OUTF" "$OUTF.req"
+)
+[[ "$EXP_TIMEOUT_MIN" =~ ^[0-9]+$ ]] || EXP_TIMEOUT_MIN=0
+[ $((EXP_TIMEOUT_MIN + 30)) -gt "$WATCHDOG_MIN" ] && WATCHDOG_MIN=$((EXP_TIMEOUT_MIN + 30))
+# The first (provisioning) boot runs setup.sh — dataset/dependency staging can take much longer.
+if [ ! -f "$MARKER" ] && [ "$WATCHDOG_MIN" -lt 240 ]; then WATCHDOG_MIN=240; fi
+log "Watchdog: this worker stops itself after ${WATCHDOG_MIN} min (experiment timeout ${EXP_TIMEOUT_MIN} min)."
 # InstanceInitiatedShutdownBehavior=stop makes this a STOP (not terminate), preserving EBS.
-# Use a detached sleep+shutdown (no dependency on the atd daemon being running).
-nohup bash -c "sleep $((WATCHDOG_MIN * 60)); shutdown -h now" >/dev/null 2>&1 &
+# A systemd timer unit, NOT a background `sleep` — a background child of this script would be killed
+# with the boot unit's cgroup as soon as this script exits, silently disarming the backstop.
+if ! systemd-run --unit=ar-worker-watchdog --collect --on-active="${WATCHDOG_MIN}m" /sbin/shutdown -h now >/dev/null 2>&1; then
+    nohup bash -c "sleep $((WATCHDOG_MIN * 60)); shutdown -h now" >/dev/null 2>&1 &
+fi
 
 if [ ! -f "$MARKER" ]; then
     log "=== Worker first-time bootstrap (instance $INSTANCE_ID) ==="

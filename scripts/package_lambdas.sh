@@ -30,6 +30,9 @@ find "$SEED/.claude/skills" -type d \( -name '.venv' -o -name '__pycache__' -o -
 #    now the `aws_auto_research` library (installed at boot); the researcher runs `aws-research
 #    researcher boot` directly (see _user_data), so no researcher .sh are bundled here.
 cp "$ROOT/worker/bootstrap.sh"               "$SEED/.auto-research/worker-bootstrap.sh"
+# Per-instance cost meter — used by BOTH the researcher (launched from `aws-research researcher boot`)
+# and the workers (launched from worker-bootstrap.sh).
+cp "$ROOT/worker/instance-meter.sh"          "$SEED/.auto-research/instance-meter.sh"
 
 # 3. The aws_auto_research runtime library -> seed/lib/ : pip-installed on the researcher at boot,
 #    providing the `aws-research` CLI that the skills call directly.

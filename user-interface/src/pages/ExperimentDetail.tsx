@@ -144,6 +144,11 @@ export default function ExperimentDetail() {
           <div>
             <Box variant="awsui-key-label">Cost</Box>
             {e.cost_usd !== undefined ? fmtUsd(e.cost_usd) : '—'}
+            {(e.agent_cost_usd !== undefined || e.worker_cost_usd !== undefined) && (
+              <Box fontSize="body-s" color="text-body-secondary">
+                Claude {fmtUsd(e.agent_cost_usd ?? 0)} · worker {fmtUsd(e.worker_cost_usd ?? 0)}
+              </Box>
+            )}
           </div>
           <div>
             <Box variant="awsui-key-label">Run time</Box>

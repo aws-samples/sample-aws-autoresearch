@@ -14,6 +14,7 @@ from ..config import Settings
 from ..control_plane import ControlPlaneClient
 
 _STATUS_ENUM = {"provisioning", "setup", "active", "paused", "completed", "provision_failed"}
+_METERED_FIELDS = {"spent_usd", "claude_cost_usd", "researcher_cost_usd", "worker_cost_usd"}
 
 
 def _now() -> str:
@@ -28,14 +29,15 @@ def experiment_item(exp_id: str, worker_id: str, hypothesis: str, description: s
 
 
 def finalize_updates(result: dict, state: str, now: str) -> dict:
-    """Terminal ledger update from a dispatch result + the analysed state; drop null fields."""
+    """Terminal ledger update from a dispatch result + the analysed state; drop null fields.
+
+    Cost fields (cost_usd, agent_cost_usd, worker_cost_usd, worker_uptime_seconds) are NOT copied:
+    dispatch already metered them into the ledger, and agent_api ignores agent-written cost fields."""
     u = {
         "state": state,
         "metric_value": result.get("metric_value"),
         "peak_vram_mb": result.get("peak_vram_mb"),
         "run_seconds": result.get("run_seconds", 0),
-        "worker_uptime_seconds": result.get("worker_uptime_seconds", 0),
-        "cost_usd": result.get("cost_usd"),
         "log_stream": result.get("log_stream"),
         "agent_log_s3_uri": result.get("agent_log_s3_uri"),
         "run_log_s3_uri": result.get("run_log_s3_uri"),
@@ -47,7 +49,7 @@ def finalize_updates(result: dict, state: str, now: str) -> dict:
 def experiment_summary(e: dict) -> dict:
     return {"id": e.get("experiment_id"), "state": e.get("state"),
             "metric": e.get("metric_value"), "vram": e.get("peak_vram_mb"),
-            "desc": e.get("description")}
+            "cost_usd": e.get("cost_usd"), "desc": e.get("description")}
 
 
 # --- git IO -------------------------------------------------------------------
@@ -107,6 +109,8 @@ def keep_best(client: ControlPlaneClient, s: Settings, exp_id: str, best: str, m
 
 
 def update_project(client: ControlPlaneClient, s: Settings, field: str, value: str) -> None:
+    if field in _METERED_FIELDS:
+        raise RuntimeError(f"'{field}' is metered automatically and cannot be set")
     if field == "status" and value not in _STATUS_ENUM:
         raise RuntimeError(f"'status' is a lifecycle enum, not a summary — put notes in report/status.md (got: {value})")
     print(json.dumps(client.update_project(s.project_id, {field: value})))
@@ -148,6 +152,8 @@ def pull_context(client: ControlPlaneClient, s: Settings) -> None:
     print(f"BEST_METRIC={p.best_metric or 'none'}")
     print(f"SPENT_USD={p.spent_usd or 0}")
     print(f"BUDGET_USD={p.budget_usd or 0}")
+    print(f"SPEND_BREAKDOWN=claude:{p.claude_cost_usd or 0} researcher:{p.researcher_cost_usd or 0} "
+          f"workers:{p.worker_cost_usd or 0}")
     print(f"STATUS={p.status or 'unknown'}")
     print(f"S3_DATA={p.s3_data or ''}")
     print("--- recent experiments ---")

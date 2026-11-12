@@ -305,6 +305,12 @@ worker-side shutdown watchdog, a per-project `budget_usd` cap, a **per-user budg
 create projects up to the budget an administrator granted them), and a **Stop** button that halts all
 compute. Verify current pricing for your chosen worker instance in your deploy region before long runs.
 
+**What counts against the budget.** `spent_usd` = Claude (Bedrock) usage of every agent invocation +
+the researcher instance's running time + every worker's running time, all metered automatically
+(see the design doc, *Cost metering*). EC2 rates are resolved for your deploy region; Claude usage is
+priced from token counts at Bedrock list price with the ~10% geographic-profile premium. EBS, S3 and
+CloudWatch are not included. Claude is typically the largest item.
+
 ---
 
 ## Security

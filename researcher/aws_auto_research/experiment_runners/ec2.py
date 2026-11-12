@@ -8,7 +8,6 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fi
 
 from .. import aws
 from ..backends import Backend, SSHBackend
-from ..rates import cost_usd
 from .base import ExperimentRunner
 
 _READY_MARKER = "~/.worker-bootstrap-complete"
@@ -60,9 +59,6 @@ class EC2Runner(ExperimentRunner):
         raise RuntimeError(f"worker {wid} NOT READY after timeout")
 
     def finalize(self) -> None:
-        aws.stop_instance(self.s.region, self.s.worker_id)
+        if not aws.stop_instance(self.s.region, self.s.worker_id):
+            raise RuntimeError(f"stop request for worker {self.s.worker_id} failed")
         print(f"stop requested for worker {self.s.worker_id}")
-
-    def _cost(self, run_seconds: int, uptime_seconds: int) -> tuple[float, int]:
-        cost = cost_usd(uptime_seconds, self.project.worker_instance_type)
-        return cost, int(uptime_seconds)

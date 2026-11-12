@@ -24,6 +24,7 @@ import boto3
 from datetime import datetime, timezone
 from decimal import Decimal
 from ar_authz import caller
+from ar_pricing import hourly_rate
 
 dynamodb = boto3.resource("dynamodb")
 codecommit = boto3.client("codecommit")
@@ -223,6 +224,11 @@ def _fast_api(event, context):
         runner = "ec2"
     worker_count = 0 if runner == "local" else max(1, int(body.get("worker_count", 1)))
     researcher_type = body.get("researcher_instance_type", "m8g.large")
+    worker_type = body.get("worker_instance_type", "g4dn.xlarge")
+    # Region-correct on-demand rates, resolved once and cached on the record: every cost the
+    # metering actions compute for this project uses them (see agent_api "Cost model").
+    researcher_rate, researcher_rate_src = hourly_rate(researcher_type, REGION)
+    worker_rate, worker_rate_src = hourly_rate(worker_type, REGION)
 
     # Record the creator as owner (immutable Cognito sub) + username for display; admins start empty.
     # Owner/admins drive write authorization (start/stop/guidance) and delete (owner-only).
@@ -264,8 +270,13 @@ def _fast_api(event, context):
                 "provisioning_error": "",
                 "model": _regional_model(body.get("model") or "us.anthropic.claude-opus-4-8"),
                 "experiment_runner": runner,
-                "worker_instance_type": body.get("worker_instance_type", "g4dn.xlarge"),
+                "worker_instance_type": worker_type,
                 "researcher_instance_type": researcher_type,
+                # Only authoritative (Pricing API) rates are cached; otherwise agent_api resolves on use.
+                **({"researcher_hourly_usd": str(researcher_rate), "researcher_rate_source": researcher_rate_src}
+                   if researcher_rate_src.startswith("pricing-api") else {}),
+                **({"worker_hourly_usd": str(worker_rate), "worker_rate_source": worker_rate_src}
+                   if worker_rate_src.startswith("pricing-api") else {}),
                 "worker_count": worker_count,
                 "budget_usd": str(max_budget),
                 "patience": str(body.get("patience", 10)),
@@ -273,7 +284,9 @@ def _fast_api(event, context):
                 "experiment_timeout_minutes": int(body.get("experiment_timeout_minutes", 15)),
                 "write_paper": bool(body.get("write_paper", False)),
                 "spent_usd": "0",
+                "claude_cost_usd": "0",
                 "researcher_cost_usd": "0",
+                "worker_cost_usd": "0",
                 "s3_data": f"s3://{DATA_BUCKET}/{project_id}",
                 "created_at": now,
             },

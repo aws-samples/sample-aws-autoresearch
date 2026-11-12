@@ -1,6 +1,4 @@
-from aws_auto_research.researcher.spend import (
-    budget_state, ledger_cost, step_cost, steps_since_last_keep,
-)
+from aws_auto_research.researcher.spend import budget_state, remaining_usd, steps_since_last_keep
 
 
 def test_budget_state():
@@ -11,10 +9,17 @@ def test_budget_state():
     assert budget_state("100", "") == "OK"       # blank = no cap
 
 
-def test_ledger_cost_tolerant():
-    exps = [{"cost_usd": "0.10"}, {"cost_usd": 0.05}, {"cost_usd": None}, {}, {"cost_usd": "x"}]
-    assert ledger_cost(exps) == 0.15
-    assert ledger_cost([]) == 0.0
+def test_budget_state_keeps_reserve():
+    assert budget_state("4", "10", reserve=6) == "OVER"   # 4 + 6 reserved for the paper >= 10
+    assert budget_state("3.9", "10", reserve=6) == "OK"
+    assert budget_state("100", "0", reserve=6) == "OK"    # no cap
+
+
+def test_remaining_usd():
+    assert remaining_usd("2.5", "10") == 7.5
+    assert remaining_usd("2.5", "10", reserve="6") == 1.5
+    assert remaining_usd("12", "10") == 0.0               # never negative
+    assert remaining_usd("12", "0") is None               # no cap
 
 
 def _e(step, some_id, state):
@@ -40,8 +45,3 @@ def test_steps_since_last_keep():
     assert steps_since_last_keep(exps) == 2
 
     assert steps_since_last_keep([]) == 0
-
-
-def test_step_cost():
-    assert step_cost(3600, 0.526) == 0.526
-    assert step_cost(0, 5.0) == 0.0

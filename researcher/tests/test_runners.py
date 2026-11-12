@@ -47,22 +47,22 @@ def test_push_and_collect_commands(settings, project):
     assert "aws s3 cp '/tmp/ckpt' s3://bucket/demo/checkpoints/step-1-baseline/" in cmds
 
 
-# ---- cost differs by runner --------------------------------------------------
+# ---- results carry no self-reported cost (dispatcher meters it) -------------
 
-def test_local_cost_is_zero(settings, project):
-    r = build(LocalRunner, settings, project, FakeBackend())
-    r.write_result("keep", "0.5", "null", 300, uptime_seconds=999, notes="x")
+@pytest.mark.parametrize("runner_cls", [LocalRunner, EC2Runner])
+def test_write_result_has_no_cost(settings, project, runner_cls):
+    r = build(runner_cls, settings, project, FakeBackend())
+    r.write_result("keep", "0.5", "null", 300, notes="x")
     res = json.loads(open(settings.result_file).read())
-    assert res["cost_usd"] == "0.0000" and res["worker_uptime_seconds"] == 0
-    assert res["metric_value"] == "0.5" and res["peak_vram_mb"] is None
+    assert "cost_usd" not in res and "worker_uptime_seconds" not in res
+    assert res["metric_value"] == "0.5" and res["peak_vram_mb"] is None and res["run_seconds"] == 300
 
 
-def test_ec2_cost_from_worker_uptime(settings, project):
+def test_ec2_finalize_raises_when_stop_fails(settings, project, mocker):
+    mocker.patch.object(aws, "stop_instance", return_value=False)
     r = build(EC2Runner, settings, project, FakeBackend())
-    r.write_result("keep", "0.5", "1240", 300, uptime_seconds=3600, notes="x")
-    res = json.loads(open(settings.result_file).read())
-    assert res["cost_usd"] == "0.5260"          # 1h @ g4dn.xlarge
-    assert res["worker_uptime_seconds"] == 3600
+    with pytest.raises(RuntimeError):
+        r.finalize()
 
 
 # ---- ec2 prepare state machine (mocked AWS, no real waits) -------------------

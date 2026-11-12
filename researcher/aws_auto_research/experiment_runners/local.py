@@ -1,4 +1,5 @@
-"""LocalRunner — experiments run on the researcher's own GPU. No worker, no SSH, cost billed via the loop."""
+"""LocalRunner — experiments run on the researcher's own GPU. No worker, no SSH; the GPU's time is
+metered as researcher cost by instance-meter.sh."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ _PREPARED_MARKER = os.path.expanduser("~/.local-experiment-prepared")
 class LocalRunner(ExperimentRunner):
     name = "local"
     supports_interactive_debug = True   # there is a live shell (this box)
-    incurs_gpu_cost = False             # billed once per step via researcher runtime
+    incurs_gpu_cost = False             # its GPU time is the researcher's (metered per instance)
 
     def _make_backend(self) -> Backend:
         return LocalBackend(self.s.code_dir)
@@ -34,8 +35,4 @@ class LocalRunner(ExperimentRunner):
         print("local prepare complete")
 
     def finalize(self) -> None:
-        pass  # the researcher stays up; nothing to stop
-
-    def _cost(self, run_seconds: int, uptime_seconds: int) -> tuple[float, int]:
-        # No extra cost on top of the researcher; the GPU is billed per step by researcher-loop.
-        return 0.0, 0
+        pass  # the researcher stays up; nothing to stop (its GPU time is metered by instance-meter.sh)

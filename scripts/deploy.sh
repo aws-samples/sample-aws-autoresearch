@@ -45,6 +45,14 @@ fi
 cdk deploy --all --require-approval never "${CDK_CONTEXT_ARGS[@]}"
 
 echo ""
+echo "--- Publishing the instance runtime bundle (skills + aws_auto_research + meter) ---"
+# Every instance syncs _platform/bundle/ into its HOME on each boot, so EXISTING projects pick up
+# runtime changes (e.g. cost metering) at their next Start. create_project also publishes it, but
+# only when a project is created — so publish it here on every deploy too.
+aws s3 sync "$INFRA_DIR/lambda/create_project/seed/" "s3://auto-research-${ACCOUNT}-${REGION}/_platform/bundle/" \
+  --region "$REGION" --only-show-errors
+
+echo ""
 echo "--- Storing API URL in SSM ---"
 API_URL=$(aws cloudformation describe-stacks \
   --stack-name AutoResearchApiStack --region "$REGION" \

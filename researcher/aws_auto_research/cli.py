@@ -241,10 +241,11 @@ def write_result(
     vram: str = typer.Argument(..., help="peak_vram_mb or 'null'"),
     run_seconds: int = typer.Argument(...),
     notes: str = typer.Argument(""),
-    uptime: int = typer.Option(0, "--uptime", help="worker uptime seconds (ec2 cost basis; ignored for local)"),
+    uptime: int = typer.Option(0, "--uptime", hidden=True,
+                               help="DEPRECATED, ignored — worker time is measured by the dispatcher"),
 ) -> None:
-    """Write the final result JSON to $RESULT_FILE."""
-    _guard(lambda r: r.write_result(status, metric, vram, run_seconds, uptime, notes))
+    """Write the final result JSON to $RESULT_FILE (cost is metered by the dispatcher, not reported here)."""
+    _guard(lambda r: r.write_result(status, metric, vram, run_seconds, notes))
 
 
 if __name__ == "__main__":

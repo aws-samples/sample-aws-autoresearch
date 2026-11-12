@@ -1,7 +1,7 @@
 """Researcher boot — replaces bootstrap.sh. Runs as root (from the UserData launcher).
 
 First boot: install Claude Code + uv + light Python libs, set git identity, clone the code+wiki repos.
-Every boot: pull. Then launch the research loop as the ubuntu user, ship its output to the researcher
+Every boot: start the instance cost meter, then pull. Then launch the research loop as the ubuntu user, ship its output to the researcher
 CloudWatch stream, and stop the instance when the loop exits (session paused/completed).
 """
 
@@ -64,6 +64,26 @@ def _geo_model(region: str) -> str:
     return f"{geo}.anthropic.claude-opus-4-8"
 
 
+METER_SCRIPT = f"{HOME_DIR}/.auto-research/instance-meter.sh"
+
+
+def _start_instance_meter(region: str, log) -> None:
+    """Meter THIS instance's running time (from its EC2 LaunchTime, so boot is billed too) into the
+    project's researcher_cost_usd — as its own systemd unit, so it keeps running (and flushes on
+    shutdown) independently of the loop, including the paper step and a Stop mid-step."""
+    if not os.path.exists(METER_SCRIPT):
+        log(f"WARNING: {METER_SCRIPT} missing — researcher instance time is NOT being metered")
+        return
+    r = subprocess.run(
+        ["systemd-run", "--unit=ar-instance-meter", "--collect",
+         "-p", "After=network-online.target", "-p", "Wants=network-online.target",
+         "-p", "Restart=on-failure", "-p", "RestartSec=30",
+         f"--setenv=AWS_REGION={region}", "/bin/bash", METER_SCRIPT],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"instance meter not started (already running?): {r.stderr.strip()[:200]}")
+
+
 def boot() -> None:
     token = urllib.request.urlopen(
         urllib.request.Request(f"{_IMDS}/api/token", method="PUT",
@@ -83,6 +103,8 @@ def boot() -> None:
 
     def log(m: str) -> None:
         send_log(region, log_group, stream, m)
+
+    _start_instance_meter(region, log)
 
     if not os.path.exists(MARKER):
         log(f"=== AI Researcher first-time bootstrap (instance {instance_id}) ===")

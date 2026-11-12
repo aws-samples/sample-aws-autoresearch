@@ -365,6 +365,12 @@ export default function ProjectLayout() {
         <div>
           <Box variant="awsui-key-label">Spend</Box>
           {fmtUsd(project.spent_usd)} / {fmtUsd(project.budget_usd)}
+          {project.claude_cost_usd !== undefined && (
+            <Box fontSize="body-s" color="text-body-secondary">
+              Claude {fmtUsd(project.claude_cost_usd)} · researcher {fmtUsd(project.researcher_cost_usd)} ·
+              workers {fmtUsd(project.worker_cost_usd)}
+            </Box>
+          )}
         </div>
         <div>
           <Box variant="awsui-key-label">Model</Box>
