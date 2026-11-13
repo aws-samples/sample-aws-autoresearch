@@ -31,11 +31,46 @@ def _imds(path: str, token: str) -> str:
     ).read().decode().strip()
 
 
-def _u(cmd: str) -> int:
+INSTALL_LOG = "/var/log/ar-installers.log"
+
+
+def _u(cmd: str, out_path: str | None = None) -> int:
     """Run a shell command as the ubuntu user, with ~/.local/bin (claude/uv) and the venv on PATH.
-    Prepending ~/.local/bin also silences the Claude installer's "not in your PATH" setup note."""
+    Prepending ~/.local/bin also silences the Claude installer's "not in your PATH" setup note.
+
+    `out_path`: send the command's stdout+stderr to this file (opened here, as root, in append mode)
+    instead of inheriting boot.sh's shared `>(tee /var/log/ar-boot.log)` pipe. Used for the third-party
+    installers: the O_NONBLOCK flag lives on the pipe's shared open file description, so a tool that
+    sets it on its stdout (and does not restore it) leaves it set for every later writer of that pipe —
+    the suspected trigger of the 2026-11-12 crash, which happened on a project's first (installing) boot."""
     full = f'export PATH="$HOME/.local/bin:{VENV}/bin:$PATH"; {cmd}'
-    return subprocess.run(["sudo", "-u", U, "bash", "-lc", full]).returncode
+    argv = ["sudo", "-u", U, "bash", "-lc", full]
+    if out_path is None:
+        return subprocess.run(argv).returncode
+    with open(out_path, "ab") as f:
+        f.write(f"\n=== {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} $ {cmd}\n".encode())
+        f.flush()
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT).returncode
+
+
+def _ensure_blocking_stdio(log, when: str, fds: tuple[int, ...] = (1, 2)) -> list[int]:
+    """Clear O_NONBLOCK on our stdout/stderr (boot.sh's tee pipe, inherited by the log shipper) if
+    anything set it. Returns the fds that had it set; each occurrence is logged as a WARNING so we
+    learn when (and after which step) something flips it."""
+    import fcntl
+    fixed = []
+    for fd in fds:
+        try:
+            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+            if fl & os.O_NONBLOCK:
+                fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
+                fixed.append(fd)
+        except OSError:
+            continue
+    if fixed:
+        log(f"[boot] WARNING: O_NONBLOCK was set on fd(s) {fixed} (boot log pipe) {when} — cleared it "
+            f"(a non-blocking pipe makes large writes fail with EAGAIN)")
+    return fixed
 
 
 def _u_retry(cmd: str, n: int = 5) -> None:
@@ -108,8 +143,13 @@ def boot() -> None:
 
     if not os.path.exists(MARKER):
         log(f"=== AI Researcher first-time bootstrap (instance {instance_id}) ===")
-        _u("curl -fsSL https://claude.ai/install.sh | bash")
-        _u("curl -LsSf https://astral.sh/uv/install.sh | sh")
+        # Third-party installers write to their own file, NOT the shared boot-log pipe (see _u).
+        for name, cmd in (("Claude Code", "curl -fsSL https://claude.ai/install.sh | bash"),
+                          ("uv", "curl -LsSf https://astral.sh/uv/install.sh | sh")):
+            rc = _u(cmd, out_path=INSTALL_LOG)
+            log(f"[boot] {name} installer exited rc={rc} (output: {INSTALL_LOG})"
+                + ("" if rc == 0 else " — WARNING: install failed"))
+        _ensure_blocking_stdio(log, "after the installers")
         _pip_install(["git-remote-codecommit"])   # git remote helper for codecommit:: clone/pull
         # symlink the venv's grcm onto PATH so system `git` finds it when cloning/pulling as ubuntu
         subprocess.run(["ln", "-sf", f"{VENV}/bin/git-remote-codecommit", "/usr/local/bin/git-remote-codecommit"])
@@ -163,17 +203,115 @@ def boot() -> None:
     }
     loop_argv = ["sudo", "-u", U, "env"] + [f"{k}={v}" for k, v in loop_env.items()] + \
                 ["aws-research", "researcher", "loop"]
-    # Two decoupled processes over a kernel pipe — mirrors the old `researcher-loop.sh 2>&1 | log-ship.sh`.
-    # The loop (and the `claude` it spawns) writes stdout+stderr straight into the pipe; a SEPARATE
-    # `aws-research log-ship` process drains it and PutLogEvents to CloudWatch. Python is out of the byte
-    # path, so a slow/throttled CloudWatch call can never block (and thus freeze) the research loop.
     ship_env = {**os.environ, "AWS_REGION": region, "LOG_GROUP": log_group,
                 "LOG_STREAM": stream, "LOG_FILE": log_file}
-    p_loop = subprocess.Popen(loop_argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    p_ship = subprocess.Popen([f"{VENV}/bin/aws-research", "log-ship"], stdin=p_loop.stdout, env=ship_env)
-    p_loop.stdout.close()   # only the shipper holds the read end (loop gets SIGPIPE if the shipper dies)
-    p_loop.wait()
-    p_ship.wait()
+
+    def status() -> str | None:
+        return _project_status(region, project_id, agent_token)
+
+    def pause() -> bool:
+        return _set_paused(region, project_id, agent_token)
+
+    def run_once() -> tuple[int, int, float]:
+        # Re-checked before EVERY (re)start: the shipper inherits these fds as its stdout/stderr.
+        _ensure_blocking_stdio(log, "before starting the research loop + log shipper")
+        return _run_loop_once(loop_argv, ship_env)
+
+    supervise(run_once, status, pause, log)
 
     log("=== Research loop ended; stopping instance ===")
     subprocess.run(["shutdown", "-h", "now"])
+
+
+# --- loop supervision ------------------------------------------------------------------------------
+# The loop exits 0 on every planned path (budget/patience → it sets 'paused' itself; Stop button →
+# a human already set 'paused'). A NON-ZERO exit is a crash: the project is still 'active' but nothing
+# is running, and since start_session only starts 'setup'/'paused' projects, it cannot even be
+# restarted from the UI. So: restart the loop (its first action re-checks status/budget/patience, so a
+# restart is always safe), and after repeated quick crashes give up by setting 'paused' (UI shows it,
+# Start works again) instead of shutting down silently with a stale 'active'.
+MAX_FAST_CRASHES = 3          # consecutive crashes, each within FAST_CRASH_S of its start → give up
+FAST_CRASH_S = 600            # a run that survived longer than this resets the crash counter
+RESTART_BACKOFF_S = (30, 60, 120)
+
+_RC_HINTS = {
+    120: "the loop could not flush stdout at exit — typically a broken pipe (log shipper gone)",
+    -9: "SIGKILL (OOM killer or manual kill)",
+    -15: "SIGTERM",
+    1: "uncaught Python exception (traceback should be in the researcher log stream above)",
+}
+
+
+def _run_loop_once(loop_argv: list[str], ship_env: dict) -> tuple[int, int, float]:
+    """Run the loop once; return (loop rc, shipper rc, seconds).
+
+    Two decoupled processes over a kernel pipe — mirrors the old `researcher-loop.sh 2>&1 | log-ship.sh`.
+    The loop (and the `claude` it spawns) writes stdout+stderr straight into the pipe; a SEPARATE
+    `aws-research log-ship` process drains it and PutLogEvents to CloudWatch. Python is out of the byte
+    path, so a slow/throttled CloudWatch call can never block (and thus freeze) the research loop."""
+    t0 = time.time()
+    p_loop = subprocess.Popen(loop_argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p_ship = subprocess.Popen([f"{VENV}/bin/aws-research", "log-ship"], stdin=p_loop.stdout, env=ship_env)
+    p_loop.stdout.close()   # only the shipper holds the read end (loop gets EPIPE if the shipper dies)
+    rc_loop = p_loop.wait()
+    rc_ship = p_ship.wait()
+    return rc_loop, rc_ship, time.time() - t0
+
+
+def _project_status(region: str, project_id: str, token: str) -> str | None:
+    """Current project status via agent_api, or None if it cannot be read."""
+    from ..control_plane import ControlPlaneClient
+    try:
+        r = ControlPlaneClient(region).invoke_raw(
+            {"action": "get_project", "project_id": project_id, "_token": token})
+        return (r.get("project") or {}).get("status")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _set_paused(region: str, project_id: str, token: str) -> bool:
+    from ..control_plane import ControlPlaneClient
+    try:
+        r = ControlPlaneClient(region).invoke_raw(
+            {"action": "update_project", "project_id": project_id,
+             "updates": {"status": "paused"}, "_token": token})
+        return bool(r.get("ok"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def supervise(run_once, get_status, set_paused, log, sleep=time.sleep) -> str:
+    """Run the loop until it exits cleanly, the project leaves 'active', or it keeps crashing.
+    Returns the outcome: 'clean' | 'not-active' | 'gave-up'. Every decision is logged."""
+    fast_crashes = 0
+    attempt = 0
+    while True:
+        attempt += 1
+        rc_loop, rc_ship, secs = run_once()
+        if rc_ship != 0:
+            log(f"[supervisor] WARNING: log shipper exited rc={rc_ship} (run {attempt}) — research log "
+                f"output after that point was lost; see /var/log/ar-boot.log / the 'boot' stream")
+        if rc_loop == 0:
+            if attempt > 1:
+                log(f"[supervisor] research loop exited cleanly on run {attempt}")
+            return "clean"
+
+        hint = _RC_HINTS.get(rc_loop, "unexpected exit")
+        st = get_status()
+        log(f"[supervisor] WARNING: research loop CRASHED (rc={rc_loop}: {hint}) after {secs:.0f}s "
+            f"on run {attempt}; project status={st or 'unknown'}")
+        if st is not None and st != "active":
+            log(f"[supervisor] project is '{st}' (not active) — not restarting")
+            return "not-active"
+
+        fast_crashes = fast_crashes + 1 if secs < FAST_CRASH_S else 1
+        if fast_crashes >= MAX_FAST_CRASHES:
+            ok = set_paused()
+            log(f"[supervisor] ERROR: {fast_crashes} consecutive crashes within {FAST_CRASH_S}s each — "
+                f"giving up; status set to 'paused' {'OK' if ok else 'FAILED (still active?)'} so the "
+                f"project can be restarted from the UI after investigation")
+            return "gave-up"
+        wait = RESTART_BACKOFF_S[min(fast_crashes, len(RESTART_BACKOFF_S)) - 1]
+        log(f"[supervisor] restarting the research loop in {wait}s "
+            f"(crash {fast_crashes}/{MAX_FAST_CRASHES - 1} restarts allowed)")
+        sleep(wait)

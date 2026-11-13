@@ -122,14 +122,29 @@ def api(payload: str = typer.Argument(..., help="JSON payload with an 'action' f
 # --- log shipping (log-ship.sh) ----------------------------------------------
 @app.command("log-ship")
 def log_ship() -> None:
-    """Ship stdin lines to a CloudWatch stream + local archive (env: LOG_GROUP, LOG_STREAM, LOG_FILE, AWS_REGION)."""
+    """Ship stdin lines to a CloudWatch stream + local archive (env: LOG_GROUP, LOG_STREAM, LOG_FILE,
+    AWS_REGION; LOG_ECHO=1 to also echo every line to stdout — off by default, see below)."""
     import os
-    from .logs import LogShipper
-    shipper = LogShipper(os.environ["AWS_REGION"], os.environ["LOG_GROUP"], os.environ["LOG_STREAM"],
-                         os.environ.get("LOG_FILE"), echo=True)
-    # readline() (not `for line in sys.stdin`) so each line ships the moment it arrives — the file
-    # iterator's read-ahead buffer would otherwise hold lines back until it fills, stalling the tail.
-    shipper.ship(iter(sys.stdin.readline, ""))
+    import traceback
+    from .logs import LogShipper, drain
+    stdin = sys.stdin.buffer   # raw bytes: decoding is done per line, tolerantly, in ship_stream
+    # No stdout echo by default. Our stdout is boot.sh's shared `>(tee /var/log/ar-boot.log)` pipe: the
+    # echo only duplicated the research log (already in CloudWatch + LOG_FILE) into the boot log, and
+    # writing big lines into that pipe while it was O_NONBLOCK is what killed the shipper — and with it
+    # the research loop — on 2026-11-12. Our own [log-ship] warnings still go to stderr (boot log).
+    echo = os.environ.get("LOG_ECHO", "0").strip().lower() in ("1", "true", "yes")
+    try:
+        shipper = LogShipper(os.environ["AWS_REGION"], os.environ["LOG_GROUP"], os.environ["LOG_STREAM"],
+                             os.environ.get("LOG_FILE"), echo=echo)
+        # ship_stream uses readline() (not iteration) so each line ships the moment it arrives.
+        shipper.ship_stream(stdin)
+    except Exception:  # noqa: BLE001 — last resort: we are the loop's only pipe reader
+        # If we exited here the research loop would die on its next write (BrokenPipeError, with its
+        # traceback lost in the same pipe). Report why, then keep draining to EOF so it runs on.
+        print("[log-ship] ERROR: shipper failed; DRAINING the rest of the research log unshipped "
+              "so the loop keeps running:\n" + traceback.format_exc(), file=sys.stderr, flush=True)
+        n = drain(stdin)
+        print(f"[log-ship] drained {n} unshipped bytes until EOF", file=sys.stderr, flush=True)
 
 
 # --- dispatch (dispatch-experiment.sh / dispatch-all.sh) ---------------------
