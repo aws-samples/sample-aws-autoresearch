@@ -21,6 +21,11 @@ HOME_DIR = f"/home/{U}"
 WORK_DIR = f"{HOME_DIR}/workspace"
 MARKER = f"{HOME_DIR}/.researcher-bootstrap-complete"
 VENV = "/opt/ar"  # isolated researcher venv (created in boot.sh); holds aws-research + the python libs below
+# Installed into the researcher venv (/opt/ar) -> available to bare `python3` for the agent's own analysis.
+RESEARCHER_LIBS = [
+    "numpy", "pandas", "scipy", "matplotlib", "seaborn", "scikit-learn", "networkx",
+    "pyyaml", "tomli", "requests", "tqdm", "pillow", "h5py", "openpyxl", "jsonschema", "pytest",
+]
 _IMDS = "http://169.254.169.254/latest"
 
 
@@ -84,16 +89,17 @@ def _u_retry(cmd: str, n: int = 5) -> None:
         time.sleep(10)
 
 
-def _pip_install(pkgs: list[str], n: int = 3) -> None:
+def _pip_install(pkgs: list[str], n: int = 3) -> bool:
     """pip install into the isolated researcher venv (/opt/ar, created in boot.sh) with retries.
     Installing in a venv (not system-wide as root) avoids the root-user + non-PEP440 (devscripts)
     pip warnings and PEP-668 entirely. The venv bin is first on the loop/agent PATH (see loop_env)."""
     pip = f"{VENV}/bin/pip"
     for i in range(1, n + 1):
         if subprocess.run([pip, "install", "--quiet", *pkgs]).returncode == 0:
-            return
+            return True
         print(f"[boot] pip retry {i}/{n}: {' '.join(pkgs)}", flush=True)
         time.sleep(10)
+    return False
 
 
 def _geo_model(region: str) -> str:
@@ -155,7 +161,12 @@ def boot() -> None:
         _pip_install(["git-remote-codecommit"])   # git remote helper for codecommit:: clone/pull
         # symlink the venv's grcm onto PATH so system `git` finds it when cloning/pulling as ubuntu
         subprocess.run(["ln", "-sf", f"{VENV}/bin/git-remote-codecommit", "/usr/local/bin/git-remote-codecommit"])
-        _pip_install(["matplotlib", "numpy", "pandas"])
+        # Analysis/tooling libs the researcher commonly needs for ad-hoc work (reading configs, plotting,
+        # stats, quick models). Heavy/framework deps (torch, jax, pybullet, ...) stay in the project's own env.
+        # One resolver run (fast); only if it fails fall back to one-by-one so a bad wheel can't block the rest.
+        if not _pip_install(RESEARCHER_LIBS, n=2):
+            for pkg in RESEARCHER_LIBS:
+                _pip_install([pkg], n=2)
         _u('git config --global user.email "researcher@auto-research"')
         _u('git config --global user.name "AI Researcher"')
         _u(f"mkdir -p {WORK_DIR}")
@@ -193,7 +204,7 @@ def boot() -> None:
 
     loop_env = {
         "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": region, "HOME": HOME_DIR,
-        # venv bin first: `python3` resolves to the venv (has matplotlib/numpy/pandas), plus aws-research + grcm
+        # venv bin first: `python3` resolves to the venv (has the RESEARCHER_LIBS analysis stack), plus aws-research + grcm
         "PATH": f"{VENV}/bin:{HOME_DIR}/.local/bin:/usr/local/bin:/usr/bin:/bin",
         # unbuffered so the loop's own progress lines flush per-line into the pipe (not block-buffered)
         "PYTHONUNBUFFERED": "1",

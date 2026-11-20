@@ -688,6 +688,14 @@ this file. Read it first.
 - Evaluate with: {config.get('evaluation_command','')}
 - The metric is read from the JSON the evaluation writes (metrics.json: {{"metric": <number>}}).
 
+## Python environments
+Bare `python3` is the researcher's own tooling venv (general analysis libs: numpy, pandas, scipy, scikit-learn, matplotlib, pyyaml, requests, ...), NOT the
+project's environment. Run project code and anything needing project dependencies through the
+project's own environment as set up by its `setup.sh` / README (typically `cd src && uv run <script>`
+or `src/.venv/bin/python`). For a one-off helper import, use `uv run --with <pkg> python -c ...`
+instead of `pip install`. A `ModuleNotFoundError` from bare `python3` is almost always this, not a
+broken project.
+
 ## Loop
 Your loop invokes `/research-step` each iteration. Follow it exactly and never pause to ask whether
 to continue — you are autonomous until the human stops the session.
