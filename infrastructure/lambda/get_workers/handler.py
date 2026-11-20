@@ -10,6 +10,7 @@ where state is the live EC2 state (running | stopped | pending | stopping | shut
 terminated | unknown).
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import boto3

@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
 import os
 import aws_cdk as cdk
+from aws_cdk import aws_lambda as _lambda
+import jsii
+from constructs import IConstruct
+import solution
 from stacks.data_stack import DataStack
 from stacks.auth_stack import AuthStack
 from stacks.compute_stack import ComputeStack
 from stacks.api_stack import ApiStack
 from stacks.webapp_stack import WebAppStack
 
+
+
+@jsii.implements(cdk.IAspect)
+class UserAgentAspect:
+    """Inject the solution user-agent token (USER_AGENT_STRING) into every Lambda function."""
+
+    def visit(self, node: IConstruct) -> None:
+        if isinstance(node, _lambda.Function):
+            node.add_environment("USER_AGENT_STRING", solution.USER_AGENT)
+
+
 app = cdk.App()
+cdk.Aspects.of(app).add(UserAgentAspect())
 
 # Account + region come from the environment (CDK_DEFAULT_ACCOUNT / CDK_DEFAULT_REGION, which the
 # AWS CLI/CDK populate from the active credentials and $AWS_REGION). Region defaults to us-east-1 —
@@ -17,9 +33,12 @@ env = cdk.Environment(
     region=os.environ.get("CDK_DEFAULT_REGION", "us-east-1"),
 )
 
-data_stack = DataStack(app, "AutoResearchDataStack", env=env)
-auth_stack = AuthStack(app, "AutoResearchAuthStack", env=env)
-compute_stack = ComputeStack(app, "AutoResearchComputeStack", env=env)
+data_stack = DataStack(app, "AutoResearchDataStack", env=env,
+                       description=solution.description("D", "Data Stack"))
+auth_stack = AuthStack(app, "AutoResearchAuthStack", env=env,
+                       description=solution.description("A", "Auth Stack"))
+compute_stack = ComputeStack(app, "AutoResearchComputeStack", env=env,
+                             description=solution.description("C", "Compute Stack"))
 api_stack = ApiStack(
     app,
     "AutoResearchApiStack",
@@ -38,7 +57,9 @@ api_stack = ApiStack(
     worker_key_name=compute_stack.worker_key_name,
     vpc=compute_stack.vpc,
     env=env,
+    description=solution.description(),  # main deployment template: bare Solution ID
 )
-webapp_stack = WebAppStack(app, "AutoResearchWebAppStack", env=env)
+webapp_stack = WebAppStack(app, "AutoResearchWebAppStack", env=env,
+                           description=solution.description("W", "Web App Stack"))
 
 app.synth()

@@ -41,6 +41,7 @@ Updates use optimistic concurrency on `cost_version`, so concurrent meters (rese
 N workers, N sub-agents) never lose an increment.
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import os
 import time
 from decimal import Decimal

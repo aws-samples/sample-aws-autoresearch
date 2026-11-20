@@ -3,6 +3,7 @@ stop_session: Stop the AI Researcher instance (and the GPU worker, for safety),
 and mark the project paused. This is the "session over, stop spending" control.
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import boto3

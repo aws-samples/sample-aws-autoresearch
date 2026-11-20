@@ -13,6 +13,7 @@ only the owner can delete. This function manages who the admins are:
 pending-request list needs a call. No Cognito groups — membership is just owner + the admins map.
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import boto3

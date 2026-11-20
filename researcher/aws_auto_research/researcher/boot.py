@@ -43,7 +43,9 @@ def _u(cmd: str, out_path: str | None = None) -> int:
     installers: the O_NONBLOCK flag lives on the pipe's shared open file description, so a tool that
     sets it on its stdout (and does not restore it) leaves it set for every later writer of that pipe —
     the suspected trigger of the 2026-11-12 crash, which happened on a project's first (installing) boot."""
-    full = f'export PATH="$HOME/.local/bin:{VENV}/bin:$PATH"; {cmd}'
+    ua = os.environ.get("USER_AGENT_STRING")
+    ua_export = f'export USER_AGENT_STRING="{ua}"; ' if ua else ""
+    full = f'{ua_export}export PATH="$HOME/.local/bin:{VENV}/bin:$PATH"; {cmd}'
     argv = ["sudo", "-u", U, "bash", "-lc", full]
     if out_path is None:
         return subprocess.run(argv).returncode

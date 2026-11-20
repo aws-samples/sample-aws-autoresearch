@@ -14,6 +14,7 @@ Project statuses: provisioning -> active (auto_start, default: researcher runs i
 setup (auto_start=false: ready to Start) | provision_failed (see provisioning_error).
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import base64
 import json
 import os
@@ -776,7 +777,7 @@ if [ "$ROLE" = "researcher" ] && [ -d "/home/$U/lib" ]; then
   ln -sf /opt/ar/bin/aws-research /usr/local/bin/aws-research
   command -v aws-research >/dev/null || echo "[boot] WARNING: aws-research CLI not on PATH"
 fi
-if [ "$ROLE" = "researcher" ]; then exec env AWS_REGION="$AWS_REGION" PATH="/usr/local/bin:$PATH" aws-research researcher boot; else exec bash "/home/$U/.auto-research/worker-bootstrap.sh"; fi
+if [ "$ROLE" = "researcher" ]; then exec env AWS_REGION="$AWS_REGION" USER_AGENT_STRING="__USER_AGENT_STRING__" PATH="/usr/local/bin:$PATH" aws-research researcher boot; else exec bash "/home/$U/.auto-research/worker-bootstrap.sh"; fi
 BOOT
 chmod +x /opt/auto-research/boot.sh
 cat > /etc/systemd/system/auto-research-boot.service <<'UNIT'
@@ -799,7 +800,8 @@ systemctl enable auto-research-boot.service
 # enabled service via multi-user.target. (Do NOT `shutdown` here: that would leave the instance stopped
 # with nothing to start it, since provisioning launches the instance running and never re-starts it.)
 systemctl start auto-research-boot.service
-""").replace("__DATA_BUCKET__", DATA_BUCKET)
+""").replace("__DATA_BUCKET__", DATA_BUCKET).replace(
+        "__USER_AGENT_STRING__", os.environ.get("USER_AGENT_STRING", ""))
 
 
 def _create_instance(*, name, instance_type, ami, root_device, project_id, role, sg_id, key_name, ebs_gb,

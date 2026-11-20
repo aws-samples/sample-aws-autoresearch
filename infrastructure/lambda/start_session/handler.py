@@ -6,6 +6,7 @@ AI Researcher is started; it (via the run-experiment sub-agent) powers the GPU
 worker on/off itself.
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import boto3

@@ -8,6 +8,7 @@ Routes (dispatched by routeKey):
 - GET /projects/{id}/code/diff?ref=&base=main -> {diffs:[{path,change_type,after_content}]}
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import difflib
 import json
 import os

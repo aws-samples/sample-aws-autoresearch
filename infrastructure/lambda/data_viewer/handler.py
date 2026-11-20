@@ -7,6 +7,7 @@ All keys are under s3://{DATA_BUCKET}/{project}/. Routes (dispatched by routeKey
 - GET /projects/{id}/data/preview?key=...     -> {content, truncated}  (text, whole lines)
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import boto3

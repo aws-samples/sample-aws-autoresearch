@@ -12,6 +12,7 @@ Two modes in one function (mirrors create_project), so the UI never waits on a s
   Gateway 29s cap. Best-effort and idempotent — missing pieces are skipped.
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import re

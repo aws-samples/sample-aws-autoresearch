@@ -10,6 +10,7 @@ deleting refunds the unspent part (delete_project). Everyone starts at 0; the fi
 seeded manually (see README). Identity comes from the Cognito JWT (see ar_authz).
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 from decimal import Decimal

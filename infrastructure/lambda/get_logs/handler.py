@@ -14,6 +14,7 @@ via the S3 archive (GET /data/url?key=logs/researcher.jsonl or experiments/{id}/
 Query params: stream (optional), limit (default 200, max 1000), start (epoch ms, optional).
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import boto3

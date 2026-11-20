@@ -6,6 +6,7 @@ iteration (there is no orchestrator-wake model). guidance_id is time-sortable so
 the agent processes items in submission order.
 """
 
+import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
 import json
 import os
 import uuid
