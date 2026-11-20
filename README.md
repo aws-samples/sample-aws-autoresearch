@@ -10,6 +10,8 @@ runs each experiment on a GPU worker it powers on and off itself, and streams ev
 app so you can watch it think. This repo is self-contained: infrastructure (CDK), the agent, and
 the web app.
 
+>📝 **Blog post:** [From Literature to Experiments: An AI Researcher on AWS](https://builder.aws.com/content/3LYEnzizOAzNKzdB6PA3NstE1n1/from-literature-to-experiments-an-ai-researcher-on-aws)
+
 > **This README is the main user documentation.** Its core is the **bootstrap-directory
 > convention** below — define any conforming project as a folder, upload it, and the AI Researcher
 > picks it up and runs. `demos/` has ready-to-run examples.
