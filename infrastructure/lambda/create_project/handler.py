@@ -21,7 +21,9 @@ import os
 import re
 import secrets
 import time
+import uuid
 import boto3
+from botocore.config import Config as BotoConfig
 from datetime import datetime, timezone
 from decimal import Decimal
 from ar_authz import caller
@@ -31,7 +33,8 @@ dynamodb = boto3.resource("dynamodb")
 codecommit = boto3.client("codecommit")
 ec2 = boto3.client("ec2")
 logs_client = boto3.client("logs")
-s3 = boto3.client("s3")
+# SigV4 + regional endpoint: presigned PUT URLs are used cross-origin from the browser (no redirects).
+s3 = boto3.client("s3", config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "virtual"}))
 lam = boto3.client("lambda")
 iam = boto3.client("iam")
 ssm = boto3.client("ssm")
@@ -173,7 +176,38 @@ def handler(event, context):
     # Async provisioning self-invoke carries {"_provision": true, "project_id": ...}.
     if isinstance(event, dict) and event.get("_provision"):
         return _provision(event.get("project_id", ""))
+    if (event or {}).get("rawPath", "").rstrip("/").endswith("/projects/upload-url"):
+        return _upload_url(event)
     return _fast_api(event, context)
+
+
+# --------------------------------------------------------------------------- large bootstrap uploads
+# API Gateway (10 MB) and Lambda (6 MB) cap a synchronous request body, and files travel base64-encoded
+# (+33%). To lift that limit the web app asks for a presigned S3 PUT URL, uploads the {"files": [...]}
+# JSON straight to S3, and then calls POST /projects with {"upload_id": ...} instead of inline "files".
+UPLOAD_PREFIX = "_uploads"
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(64 * 1024 * 1024)))  # decoded files total
+UPLOAD_URL_TTL_S = 900
+_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _upload_key(sub, upload_id):
+    # Keyed by the caller's Cognito sub: a user can only ever reference an upload they minted.
+    return f"{UPLOAD_PREFIX}/{sub}/{upload_id}.json"
+
+
+def _upload_url(event):
+    who = caller(event)
+    if not who["sub"]:
+        return _resp(403, {"error": "Could not identify the requesting user."})
+    upload_id = uuid.uuid4().hex
+    url = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": DATA_BUCKET, "Key": _upload_key(who["sub"], upload_id), "ContentType": "application/json"},
+        ExpiresIn=UPLOAD_URL_TTL_S,
+    )
+    return _resp(200, {"upload_id": upload_id, "url": url, "max_bytes": MAX_UPLOAD_BYTES,
+                       "expires_in": UPLOAD_URL_TTL_S})
 
 
 # --------------------------------------------------------------------------- API (fast) mode
@@ -184,7 +218,26 @@ def _fast_api(event, context):
     except Exception as e:  # noqa: BLE001
         return _resp(400, {"error": f"Invalid request body: {e}"})
 
+    upload_id = body.get("upload_id")
+    if upload_id:
+        # Large upload staged in S3 by the web app (see _upload_url). Pull it in as the inline "files".
+        who_up = caller(event)
+        if not who_up["sub"] or not _UPLOAD_ID_RE.match(str(upload_id)):
+            return _resp(400, {"error": "Invalid upload_id."})
+        key = _upload_key(who_up["sub"], upload_id)
+        try:
+            staged = json.loads(s3.get_object(Bucket=DATA_BUCKET, Key=key)["Body"].read())
+        except Exception as e:  # noqa: BLE001
+            return _resp(400, {"error": f"Upload {upload_id} not found or unreadable ({type(e).__name__}); re-upload the folder."})
+        body["files"] = staged.get("files", [])
+        try:
+            s3.delete_object(Bucket=DATA_BUCKET, Key=key)
+        except Exception:  # noqa: BLE001
+            pass
+
     uploaded = _decode_files(body.get("files", []))
+    if sum(len(c) for c in uploaded.values()) > MAX_UPLOAD_BYTES:
+        return _resp(413, {"error": f"Bootstrap folder too large (> {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)."})
     if "auto-research.json" not in uploaded:
         return _resp(400, {"error": "Uploaded folder must contain auto-research.json at its root"})
     try:
@@ -516,13 +569,34 @@ def _commit_code_repo(repo, uploaded, config, read_only_files, project_id, readm
     if not any(p == "src" or p.startswith("src/") for p in files):
         files["src/.gitkeep"] = b""
     put_files = [{"filePath": p, "fileContent": c} for p, c in files.items()]
-    try:
-        codecommit.create_commit(
-            repositoryName=repo, branchName="main", putFiles=put_files,
-            commitMessage="Initial project (uploaded research bootstrap)",
-            authorName="auto-research", email="auto-research@system")
-    except codecommit.exceptions.ParentCommitIdRequiredException:
-        pass
+    # CodeCommit caps one CreateCommit request (~6 MB of file content), so large bootstraps are split
+    # into several commits of <= _COMMIT_BATCH_BYTES. Each follows the previous (parentCommitId).
+    batches, cur, cur_bytes = [], [], 0
+    for pf in put_files:
+        sz = len(pf["fileContent"])
+        if cur and cur_bytes + sz > _COMMIT_BATCH_BYTES:
+            batches.append(cur)
+            cur, cur_bytes = [], 0
+        cur.append(pf)
+        cur_bytes += sz
+    if cur:
+        batches.append(cur)
+    parent = None
+    for i, batch in enumerate(batches):
+        msg = "Initial project (uploaded research bootstrap)"
+        if len(batches) > 1:
+            msg += f" [{i + 1}/{len(batches)}]"
+        kwargs = dict(repositoryName=repo, branchName="main", putFiles=batch, commitMessage=msg,
+                      authorName="auto-research", email="auto-research@system")
+        if parent:
+            kwargs["parentCommitId"] = parent
+        try:
+            parent = codecommit.create_commit(**kwargs)["commitId"]
+        except codecommit.exceptions.ParentCommitIdRequiredException:
+            return  # repo already has commits (re-provision): leave it as is
+
+
+_COMMIT_BATCH_BYTES = 4 * 1024 * 1024
 
 
 def _upload_platform_bundle(project_id, read_only_files):

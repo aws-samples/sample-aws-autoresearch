@@ -12,9 +12,18 @@ import Input from '@cloudscape-design/components/input';
 import Select from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
-import { createProject, getMe, fmtUsd, type BootstrapFile } from '../services/api';
+import {
+  createProject,
+  getMe,
+  fmtUsd,
+  uploadBootstrapFiles,
+  INLINE_UPLOAD_MAX_BYTES,
+  type BootstrapFile,
+} from '../services/api';
 
-const MAX_BYTES = 5 * 1024 * 1024; // API Gateway / Lambda sync payload guardrail.
+// Folders larger than INLINE_UPLOAD_MAX_BYTES are uploaded to S3 via a presigned URL (no API Gateway
+// body limit). Keep in sync with MAX_UPLOAD_BYTES in the create_project Lambda.
+const MAX_BYTES = 64 * 1024 * 1024;
 const IGNORED_SEGMENTS = new Set(['.git', '.venv', 'node_modules', '__pycache__', '.DS_Store']);
 
 // Canonical, resource-safe project id. MUST stay in sync with `_slug` in the create_project
@@ -142,6 +151,9 @@ export default function CreateProjectPage() {
     setSubmitting(true);
     setError('');
     try {
+      const inlineBytes = files.reduce((n, f) => n + f.content_b64.length, 0);
+      const large = inlineBytes > INLINE_UPLOAD_MAX_BYTES;
+      const upload_id = large ? await uploadBootstrapFiles(files) : undefined;
       const result = await createProject({
         project_name: projectId,
         experiment_runner: runLocally ? 'local' : 'ec2',
@@ -155,7 +167,7 @@ export default function CreateProjectPage() {
         experiment_timeout_minutes: parseInt(experimentTimeoutMin, 10),
         auto_start: autoStart,
         write_paper: writePaper,
-        files,
+        ...(large ? { upload_id } : { files }),
       });
       navigate(`/projects/${result.project_id}`);
     } catch (err) {

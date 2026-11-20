@@ -126,7 +126,8 @@ prose. There is no required structure — the agent reads the whole file.
 
 - **Keep it small.** Upload source, config, and small seeds only. **Do not upload data,
   checkpoints, `.venv`, `.git`, or caches** — `setup.sh` regenerates data on the worker. (The
-  uploader enforces a size cap and skips those paths.)
+  uploader enforces a 64 MB cap and skips those paths. Folders over ~3 MB are uploaded straight to S3
+  via a presigned URL, so they are not limited by the API Gateway/Lambda request-body size.)
 - **`src/` holds what's under study.** `modifiable_files` is what the agent edits; everything else
   in `src/` is protected read-only.
 - **`setup.sh` runs once** on the worker's first boot (from the repo root) to install deps and

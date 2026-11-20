@@ -322,7 +322,25 @@ export interface CreateProjectBody {
   write_paper?: boolean; // write a scientific paper when the research completes (default false)
   model?: string; // Bedrock model / inference-profile id; overrides the Lambda default.
   auto_start?: boolean; // default true: researcher runs immediately after provisioning (else status=setup, press Start).
-  files: BootstrapFile[];
+  files?: BootstrapFile[]; // inline upload (small folders)
+  upload_id?: string; // large folder staged in S3 via uploadBootstrapFiles()
+}
+
+// Bootstrap folders above this many (base64) bytes skip the API Gateway/Lambda request-body limit
+// (6-10 MB) by uploading the file list straight to S3 through a presigned URL.
+export const INLINE_UPLOAD_MAX_BYTES = 3 * 1024 * 1024;
+
+export async function uploadBootstrapFiles(files: BootstrapFile[]): Promise<string> {
+  const { upload_id, url } = await json<{ upload_id: string; url: string }>(
+    await authFetch('/projects/upload-url', { method: 'POST', body: '{}' })
+  );
+  const put = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files }),
+  });
+  if (!put.ok) throw new Error(`Uploading the bootstrap folder failed (${put.status} ${put.statusText})`);
+  return upload_id;
 }
 
 export async function createProject(

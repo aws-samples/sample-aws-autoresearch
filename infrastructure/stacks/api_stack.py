@@ -83,7 +83,8 @@ class ApiStack(Stack):
             description="Per-project authorization helpers (ar_authz) + region-aware EC2 rates (ar_pricing).",
         )
 
-        def make_fn(name: str, timeout: int = 30, extra_env: dict | None = None) -> _lambda.Function:
+        def make_fn(name: str, timeout: int = 30, extra_env: dict | None = None,
+                    memory_size: int = 128) -> _lambda.Function:
             return _lambda.Function(
                 self,
                 f"Fn{name}",
@@ -92,6 +93,7 @@ class ApiStack(Stack):
                 handler="handler.handler",
                 code=_lambda.Code.from_asset(f"{lambda_dir}/{name}"),
                 timeout=Duration.seconds(timeout),
+                memory_size=memory_size,
                 environment={**common_env, **(extra_env or {})},
                 layers=[authz_layer],
             )
@@ -137,6 +139,7 @@ class ApiStack(Stack):
         fn_create_project = make_fn(
             "create_project",
             timeout=300,
+            memory_size=1536,  # holds a large (tens of MB) base64 bootstrap upload in memory
             extra_env={
                 "INSTANCE_PROFILE_NAME": instance_profile_name,
                 "RESEARCHER_SECURITY_GROUP_ID": researcher_security_group_id,
@@ -504,6 +507,7 @@ class ApiStack(Stack):
         PUT = apigwv2.HttpMethod.PUT
         routes = [
             ("CreateProject", POST, "/projects", fn_create_project),
+            ("CreateProjectUploadUrl", POST, "/projects/upload-url", fn_create_project),
             ("DeleteProject", DELETE, "/projects/{projectId}", fn_delete_project),
             ("ListProjects", GET, "/projects", fn_get_experiments),
             ("GetExperiments", GET, "/projects/{projectId}/experiments", fn_get_experiments),

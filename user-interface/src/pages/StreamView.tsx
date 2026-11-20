@@ -87,7 +87,9 @@ export default function StreamView() {
         {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
         <LogFeed
           projectId={projectId!}
-          stream="boot"
+          // `boot` only covers the pre-loop shell script; the research loop (and the bootstrap
+          // lines) go to researcher-<instance-id>. Fall back to `boot` until that stream is known.
+          stream={project?.researcher_log_stream || 'boot'}
           height="55vh"
           emptyText="No activity yet. The stream updates every few seconds."
         />

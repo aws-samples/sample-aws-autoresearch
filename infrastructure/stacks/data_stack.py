@@ -96,6 +96,13 @@ class DataStack(Stack):
             point_in_time_recovery=True,
         )
 
+        allowed_origins_ctx = self.node.try_get_context("allowed_origins")
+        allowed_origins = (
+            [o.strip() for o in allowed_origins_ctx.split(",") if o.strip()]
+            if isinstance(allowed_origins_ctx, str) and allowed_origins_ctx.strip()
+            else ["*"]
+        )
+
         # Explicit name so it matches the instance-role S3 policy in ComputeStack
         # (arn:aws:s3:::auto-research-{account}-{region}). Without this, CDK auto-names
         # the bucket and the instance role cannot read/write it.
@@ -106,6 +113,17 @@ class DataStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
+            # Browser PUT of large bootstrap folders via presigned URL (see create_project upload-url).
+            # Origins default to "*" (a presigned URL is the credential); deploy.sh passes the
+            # CloudFront origin via -c allowed_origins=... to tighten it.
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[s3.HttpMethods.PUT],
+                    allowed_origins=allowed_origins,
+                    allowed_headers=["*"],
+                    max_age=3000,
+                )
+            ],
         )
 
         CfnOutput(self, "ProjectsTableName", value=self.projects_table.table_name)
