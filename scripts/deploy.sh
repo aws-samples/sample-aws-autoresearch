@@ -42,7 +42,8 @@ CDK_CONTEXT_ARGS=()
 if [ -n "$ALLOWED_ORIGINS" ] && [ "$ALLOWED_ORIGINS" != "None" ]; then
   CDK_CONTEXT_ARGS+=(-c "allowed_origins=$ALLOWED_ORIGINS")
 fi
-cdk deploy --all --require-approval never "${CDK_CONTEXT_ARGS[@]}"
+# Extra arguments go to cdk, e.g. domain extensions: ./scripts/deploy.sh -c extensions=<package dir>[,<dir>]
+cdk deploy --all --require-approval never "${CDK_CONTEXT_ARGS[@]}" "$@"
 
 echo ""
 echo "--- Publishing the instance runtime bundle (skills + aws_auto_research + meter) ---"

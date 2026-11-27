@@ -14,6 +14,7 @@ import urllib.request
 
 import boto3
 
+from .. import extensions as _ext
 from ..logs import send_log
 
 U = "ubuntu"
@@ -198,6 +199,8 @@ def boot() -> None:
     except Exception:  # noqa: BLE001
         agent_token = ""
 
+    ext_env, ext_docs = _install_extensions(region, project_id, agent_token, log)
+
     log_file = f"{WORK_DIR}/logs/researcher.jsonl"
     _u(f"mkdir -p {WORK_DIR}/logs")
     log(f"--- Starting research loop (stream: {stream}) ---")
@@ -213,6 +216,7 @@ def boot() -> None:
         "CLAUDE_MODEL": model, "LOG_GROUP": log_group, "RESEARCHER_LOG_FILE": log_file,
         "BASH_DEFAULT_TIMEOUT_MS": os.environ.get("BASH_DEFAULT_TIMEOUT_MS", "1800000"),
         "BASH_MAX_TIMEOUT_MS": os.environ.get("BASH_MAX_TIMEOUT_MS", "1800000"),
+        **ext_env,                   # domain extensions' client environment (no secrets: SSM paths only)
     }
     loop_argv = ["sudo", "-u", U, "env"] + [f"{k}={v}" for k, v in loop_env.items()] + \
                 ["aws-research", "researcher", "loop"]
@@ -232,8 +236,51 @@ def boot() -> None:
 
     supervise(run_once, status, pause, log)
 
+    for doc in ext_docs:              # e.g. cancel the extension's calls still running (as the loop's user)
+        _ext.hook(doc, "on_stop", ext_env, log, run=_as_user(loop_env))
+
     log("=== Research loop ended; stopping instance ===")
     subprocess.run(["shutdown", "-h", "now"])
+
+
+def _install_extensions(region: str, project_id: str, token: str, log) -> tuple[dict, list]:
+    """Install the project's domain extensions (client, skill, environment); run their health hooks.
+    Returns (the loop's extra environment, the installed manifests)."""
+    from ..control_plane import ControlPlaneClient
+    try:
+        p = ControlPlaneClient(region).invoke_raw({"action": "get_project", "project_id": project_id, "_token": token})
+        project = p.get("project") or {}
+    except Exception as e:  # noqa: BLE001
+        log(f"[ext] could not read the project's extensions: {e!r}")
+        return {}, []
+    recs, bucket = project.get("extensions") or {}, _ext.bucket_of(project.get("s3_data", ""))
+    env, docs = {}, []
+    for name, rec in recs.items():
+        doc = _ext.install(name, bucket, region, HOME_DIR, U, log)
+        if doc is None:
+            continue
+        e = _ext.resolve_env(doc, rec, project_id)
+        clash = sorted(set(e) & set(env))
+        if clash:
+            log(f"[ext] {name}: WARNING: its environment overrides {clash}")
+        env.update(e)
+        docs.append(doc)
+        log(f"[ext] {name}: ready as {rec.get('identity')} (status {rec.get('status')})")
+    if env:
+        with open("/etc/profile.d/ar-extensions.sh", "w") as f:     # for humans on SSM/SSH sessions
+            f.write(_ext.profile_script(env))
+    run_as = _as_user({"HOME": HOME_DIR, "AWS_REGION": region, "PATH": "/usr/local/bin:/usr/bin:/bin", **env})
+    for doc in docs:
+        _ext.hook(doc, "health", env, log, run=run_as)
+    return env, docs
+
+
+def _as_user(env: dict):
+    """A ``subprocess.run`` that runs as the ubuntu user with exactly ``env`` (for extension hooks)."""
+    def run(argv, **kw):
+        kw.pop("env", None)
+        return subprocess.run(["sudo", "-u", U, "env", "-i", *[f"{k}={v}" for k, v in env.items()], *argv], **kw)
+    return run
 
 
 # --- loop supervision ------------------------------------------------------------------------------

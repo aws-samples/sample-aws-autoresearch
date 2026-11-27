@@ -10,6 +10,7 @@ from stacks.auth_stack import AuthStack
 from stacks.compute_stack import ComputeStack
 from stacks.api_stack import ApiStack
 from stacks.webapp_stack import WebAppStack
+from stacks.extension_stack import DomainExtensionStack, load_manifest
 
 
 
@@ -61,5 +62,14 @@ api_stack = ApiStack(
 )
 webapp_stack = WebAppStack(app, "AutoResearchWebAppStack", env=env,
                            description=solution.description("W", "Web App Stack"))
+
+# Domain extensions installed in this deployment: -c extensions=<package dir>[,<dir>...] (design.md "Domain
+# extensions"). Each becomes an AutoResearchExtension-<name> stack; removing it from the list and destroying that
+# stack uninstalls it.
+for ext_dir in [d.strip() for d in str(app.node.try_get_context("extensions") or "").split(",") if d.strip()]:
+    name = load_manifest(ext_dir)["name"]
+    ext = DomainExtensionStack(app, f"AutoResearchExtension-{name}", ext_dir=ext_dir, env=env,
+                               description=solution.description("X", f"Domain extension {name}"))
+    ext.add_dependency(api_stack)
 
 app.synth()

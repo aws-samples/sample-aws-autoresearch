@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 
+from .. import extensions as _ext
 from ..config import Settings
 from ..control_plane import ControlPlaneClient, Project
 from ..costs import MIN_CLAUDE_BUDGET_USD, ClaudeCostMeter, budget_for_claude, claude_reporter, run_metered
@@ -89,7 +90,7 @@ def _paper_reserve(env: dict, project: Project) -> float:
     return min(want, _PAPER_RESERVE_MAX_FRACTION * budget) if budget > 0 else want
 
 
-_TOTALS = ("claude_cost_usd", "researcher_cost_usd", "worker_cost_usd", "spent_usd")
+_TOTALS = ("claude_cost_usd", "researcher_cost_usd", "worker_cost_usd", "extension_cost_usd", "spent_usd")
 
 
 def _totals(p: Project) -> dict:
@@ -121,7 +122,8 @@ def _print_spend(client: ControlPlaneClient, project_id: str, note: str = "") ->
     p = client.get_project(project_id)
     print(f"spend to date: ${float(p.spent_usd or 0):.4f} of ${float(p.budget_usd or 0):.2f} "
           f"(claude ${float(p.claude_cost_usd or 0):.4f} + researcher ${float(p.researcher_cost_usd or 0):.4f} "
-          f"+ workers ${float(p.worker_cost_usd or 0):.4f}){note}")
+          f"+ workers ${float(p.worker_cost_usd or 0):.4f}"
+          + (f" + extensions ${float(p.extension_cost_usd or 0):.4f}" if p.extensions else "") + f"){note}")
     return p
 
 
@@ -171,9 +173,15 @@ def loop() -> None:
     s3 = client.get_project(s.project_id).s3_data
 
     print(f"Research loop started | project={s.project_id} | model={env.get('CLAUDE_MODEL', '')}")
+    # domain extensions' own ledgers count in the spend: polled in the background (a research step can
+    # wait an hour on an external job) and once before every budget check
+    poller = _ext.CostPoller(client, s.project_id, _ext.loop_extensions(client.get_project(s.project_id)))
+    poller.start()
     done_reason = None  # set only when research COMPLETES (budget/patience); stays None on a manual Stop
     project = None
     while True:
+        if poller.exts:
+            poller.poll()
         project = client.get_project(s.project_id)
         if project.status != "active":
             print(f"Project status is '{project.status}' (not active) — ending loop.")
@@ -230,5 +238,6 @@ def loop() -> None:
         client.update_project(s.project_id, {"status": "paused"})
         _print_spend(client, s.project_id, " — final")
 
+    poller.stop()
     _archive(log_file, s3, s.region)
     print("Research loop finished.")

@@ -79,6 +79,10 @@ export interface Project {
   claude_cost_usd?: number | string;
   researcher_cost_usd?: number | string;
   worker_cost_usd?: number | string;
+  extension_cost_usd?: number | string; // domain extensions' calls (polled from their own ledgers)
+  // Domain extensions the project uses: provisioned credentials (no secrets) and their state.
+  extensions?: Record<string, ProjectExtension>;
+  extension_costs?: Record<string, { final?: string; active?: string; t?: number }>;
   created_at?: string;
   // Async provisioning progress (status === 'provisioning' | 'provision_failed').
   provisioning_state?: string; // queued|creating-repos|committing|resolving-amis|creating-researcher|creating-workers|done|failed
@@ -87,6 +91,34 @@ export interface Project {
   // Observability: the AI Researcher writes its own tailable stream + S3 archive.
   researcher_log_stream?: string;
   researcher_log_s3_uri?: string;
+}
+
+// A domain extension as one project uses it (design.md "Domain extensions").
+export interface ProjectExtension {
+  status: 'pending' | 'ok' | 'unhealthy' | 'disabled' | string;
+  status_reason?: string;
+  display_name?: string;
+  provider?: string; // e.g. cognito-user
+  identity?: string; // e.g. the robots-sim user ar-<project>
+  health?: string;
+  web_url?: string;
+}
+
+// An installed domain extension (public fields of its manifest; GET /extensions).
+export interface InstalledExtension {
+  name: string;
+  display_name: string;
+  description: string;
+  cost_note: string;
+  web_url: string;
+  provider_type?: string;
+  metered: boolean;
+  installed_at: string;
+}
+
+export async function listExtensions(): Promise<InstalledExtension[]> {
+  const data = await json<{ extensions?: InstalledExtension[] }>(await authFetch('/extensions'));
+  return data.extensions ?? [];
 }
 
 // Single lifecycle field: an experiment is `running` (a worker is executing it) or one of the
@@ -311,7 +343,7 @@ export interface BootstrapFile {
 
 export interface CreateProjectBody {
   project_name: string;
-  experiment_runner?: 'ec2' | 'local'; // "ec2" (default): GPU workers; "local": run on the GPU researcher, 0 workers
+  experiment_runner?: 'ec2' | 'local'; // "ec2" (default): GPU workers; "local": run on the researcher (GPU or CPU), 0 workers
   researcher_instance_type: string;
   worker_instance_type: string;
   worker_count: number;
@@ -322,6 +354,7 @@ export interface CreateProjectBody {
   write_paper?: boolean; // write a scientific paper when the research completes (default false)
   model?: string; // Bedrock model / inference-profile id; overrides the Lambda default.
   auto_start?: boolean; // default true: researcher runs immediately after provisioning (else status=setup, press Start).
+  extensions?: string[]; // domain extensions to enable (those auto-research.json requires are always enabled)
   files?: BootstrapFile[]; // inline upload (small folders)
   upload_id?: string; // large folder staged in S3 via uploadBootstrapFiles()
 }

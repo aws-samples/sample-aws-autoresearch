@@ -100,6 +100,7 @@ const PROVISIONING_STEPS = [
   'creating-repos',
   'committing',
   'resolving-amis',
+  'extensions',
   'creating-researcher',
   'creating-workers',
   'done',
@@ -217,6 +218,7 @@ export default function ProjectLayout() {
   }
 
   const isProvisioning = project.status === 'provisioning';
+  const extNames = Object.keys(project.extensions ?? {});
   const isFailed = project.status === 'provision_failed';
   const sessionActive = project.status === 'active';
 
@@ -328,7 +330,7 @@ export default function ProjectLayout() {
         </Header>
       }
     >
-      <ColumnLayout columns={5} variant="text-grid">
+      <ColumnLayout columns={extNames.length > 0 ? 6 : 5} variant="text-grid">
         <div>
           <Box variant="awsui-key-label">Session</Box>
           <SpaceBetween size="xs">
@@ -369,6 +371,19 @@ export default function ProjectLayout() {
             <Box fontSize="body-s" color="text-body-secondary">
               Claude {fmtUsd(project.claude_cost_usd)} · researcher {fmtUsd(project.researcher_cost_usd)} ·
               workers {fmtUsd(project.worker_cost_usd)}
+              {extNames.length > 0 && (
+                <>
+                  {' '}· extensions {fmtUsd(project.extension_cost_usd ?? 0)}
+                  {extNames.map((n) => {
+                    const c = project.extension_costs?.[n];
+                    return c ? (
+                      <Box key={n} fontSize="body-s" color="text-body-secondary">
+                        {n}: finished {fmtUsd(c.final ?? 0)}, running {fmtUsd(c.active ?? 0)} (estimate)
+                      </Box>
+                    ) : null;
+                  })}
+                </>
+              )}
             </Box>
           )}
         </div>
@@ -376,6 +391,25 @@ export default function ProjectLayout() {
           <Box variant="awsui-key-label">Model</Box>
           <Box fontSize="body-s">{project.model || '—'}</Box>
         </div>
+        {extNames.length > 0 && (
+          <div>
+            <Box variant="awsui-key-label">Domain extensions</Box>
+            <SpaceBetween size="xxs">
+              {extNames.map((n) => {
+                const e = project.extensions![n];
+                const type = e.status === 'ok' ? 'success' : e.status === 'disabled' ? 'stopped'
+                  : e.status === 'pending' ? 'pending' : 'warning';
+                return (
+                  <Box key={n} fontSize="body-s">
+                    <StatusIndicator type={type}>{e.display_name || n}</StatusIndicator>{' '}
+                    {e.identity && <>as {e.web_url ? <a href={e.web_url} target="_blank" rel="noreferrer">{e.identity}</a> : e.identity}</>}
+                    {e.status_reason && <Box fontSize="body-s" color="text-body-secondary">{e.status_reason}</Box>}
+                  </Box>
+                );
+              })}
+            </SpaceBetween>
+          </div>
+        )}
       </ColumnLayout>
     </Container>
   );

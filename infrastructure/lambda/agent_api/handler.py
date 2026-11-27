@@ -21,13 +21,14 @@ Actions:
     meter_instance     {project_id, instance_id, start_epoch, end_epoch}       -> {kind, charged_seconds, charged_usd}
     meter_claude       {project_id, invocation_id, cumulative_usd, experiment_id?} -> {charged_usd}
     record_worker_usage {project_id, experiment_id, worker_uptime_seconds}      -> {recorded, worker_cost_usd}
+    meter_extension    {project_id, extension, final_usd, active_usd}          -> {charged_usd, extension_usd}
 
 Every response is {"ok": true, ...} or {"ok": false, "error": "..."}.
 
 Cost model
 ----------
-Project spend = claude_cost_usd + researcher_cost_usd + worker_cost_usd (all USD strings), kept in
-`spent_usd`. Totals are only ever INCREASED, by the metering actions, never written directly:
+Project spend = claude_cost_usd + researcher_cost_usd + worker_cost_usd + extension_cost_usd (all USD
+strings), kept in `spent_usd`. Totals change only through the metering actions, never written directly:
 - meter_instance: each researcher/worker instance meters its own running time (instance-meter.sh,
   launched at boot, ticks every ~60s). The caller sends an absolute [start, end] interval; we charge
   only the part beyond the instance's high-water mark (`meter_hwm[instance_id]`), so retries,
@@ -37,8 +38,17 @@ Project spend = claude_cost_usd + researcher_cost_usd + worker_cost_usd (all USD
   increase over the last value seen for that invocation_id (`claude_hwm`) — again retry-safe.
 - record_worker_usage: per-experiment ATTRIBUTION of worker time (display only — the project total
   already comes from meter_instance). Recorded once per experiment.
+- meter_extension: a domain extension's own ledger of the project's calls (polled on the researcher from
+  the extension's cost command, e.g. `rs costs --json`): `final_usd` (finished calls) and `active_usd`
+  (running calls: their estimate, a reservation). The extension's share is final + active; `final` never
+  decreases (a smaller report is ignored), `active` is replaced (a reservation settles when its call
+  finishes), so the share can go down when a call costs less than its estimate.
 Updates use optimistic concurrency on `cost_version`, so concurrent meters (researcher heartbeat,
 N workers, N sub-agents) never lose an increment.
+
+Budget hard stop: after every metering action, a project whose spend has reached its budget gets each
+domain extension's `on_budget_exhausted` hook (default `disable-user`): the extension's credentials stop
+working, so no new external call is accepted whatever the agent does.
 """
 
 import solution_user_agent  # noqa: F401 - must be first: tags AWS SDK calls (SO0382)
@@ -49,6 +59,7 @@ from decimal import Decimal
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
+import ar_extensions
 from ar_pricing import hourly_rate
 
 dynamodb = boto3.resource("dynamodb")
@@ -58,6 +69,7 @@ PROJECTS = os.environ["PROJECTS_TABLE"]
 EXPERIMENTS = os.environ["EXPERIMENTS_TABLE"]
 GUIDANCE = os.environ["GUIDANCE_TABLE"]
 REGION = os.environ.get("REGION") or os.environ.get("AWS_REGION", "us-east-1")
+DATA_BUCKET = os.environ.get("DATA_BUCKET", "")
 
 # Fields on the project record the agent is allowed to change (guards against a compromised agent
 # rewriting arbitrary project state — e.g. it can't flip a foreign field or escalate). Spend fields
@@ -68,7 +80,8 @@ PROJECT_WRITABLE = {"best_metric", "status", "paper_pdf_s3_uri"}
 EXPERIMENT_COST_FIELDS = {"cost_usd", "agent_cost_usd", "worker_cost_usd", "worker_uptime_seconds",
                           "worker_usage_runs"}
 
-COST_TOTALS = ("claude_cost_usd", "researcher_cost_usd", "worker_cost_usd")
+COST_TOTALS = ("claude_cost_usd", "researcher_cost_usd", "worker_cost_usd", "extension_cost_usd")
+_MAX_EXTENSION_USD = 1000000.0     # sanity cap on one extension's reported ledger
 _CLAUDE_HWM_KEEP = 64              # recent invocations remembered for retry de-duplication
 _MAX_INTERVAL_S = 7 * 86400        # sanity cap on one metering interval
 _MAX_INVOCATION_USD = 10000.0      # sanity cap on one claude invocation
@@ -426,6 +439,60 @@ def record_worker_usage(event):
     return {"recorded": True, "worker_uptime_seconds": secs, "worker_cost_usd": _fmt(cost)}
 
 
+def meter_extension(event):
+    """Set a domain extension's share of the project's spend from its own ledger (see "Cost model")."""
+    _req(event, "project_id", "extension")
+    name = str(event["extension"])
+    final, active = _usd(event.get("final_usd", 0)), _usd(event.get("active_usd", 0))
+    cap = Decimal(str(_MAX_EXTENSION_USD))
+    if not (0 <= final <= cap and 0 <= active <= cap):
+        raise ValueError(f"invalid extension costs final={final} active={active}")
+
+    def compute(p):
+        if name not in (p.get("extensions") or {}):
+            raise ValueError(f"project {p['project_id']} does not use extension {name!r}")
+        costs = dict(p.get("extension_costs") or {})
+        prev = costs.get(name) or {}
+        pf, pa = _usd(prev.get("final", 0)), _usd(prev.get("active", 0))
+        nf, na = max(pf, final), active
+        delta = (nf + na) - (pf + pa)
+        if delta == 0:
+            return None
+        costs[name] = {"final": _fmt(nf), "active": _fmt(na), "t": int(time.time())}
+        return {"extension_cost_usd": delta}, {"extension_costs": costs}, {"extension_usd": _fmt(nf + na)}
+
+    return _charge(event["project_id"], compute)
+
+
+def enforce_budget(project_id):
+    """Run the extensions' on_budget_exhausted hook once the project's spend has reached its budget."""
+    p = dynamodb.Table(PROJECTS).get_item(Key={"project_id": project_id}, ConsistentRead=True).get("Item") or {}
+    exts = p.get("extensions") or {}
+    budget, spent = _usd(p.get("budget_usd", 0)), _usd(p.get("spent_usd", 0))
+    if not exts or budget <= 0 or spent < budget:
+        return []
+    done = []
+    for name, rec in exts.items():
+        if rec.get("status") in ("disabled", "pending"):
+            continue
+        try:
+            doc = ar_extensions.load_manifest(boto3.client("s3"), DATA_BUCKET, name)
+            hook = ar_extensions.hook_for(doc, "on_budget_exhausted", "disable-user")
+            what = ar_extensions.run_builtin(boto3.session.Session(), hook, doc, rec)
+            status = "disabled"
+        except Exception as e:  # noqa: BLE001 - recorded; retried on the next meter call
+            what, status = f"failed: {e}", rec.get("status", "ok")
+        dynamodb.Table(PROJECTS).update_item(
+            Key={"project_id": project_id}, UpdateExpression="SET extensions.#n.#s = :s, extensions.#n.#r = :r",
+            ExpressionAttributeNames={"#n": name, "#s": "status", "#r": "status_reason"},
+            ExpressionAttributeValues={":s": status, ":r": f"budget reached (${spent:.2f} of ${budget:.2f}): {what}"})
+        done.append(f"{name}: {what}")
+    return done
+
+
+_METERING = {"meter_instance", "meter_claude", "meter_extension"}
+
+
 _ACTIONS = {
     "get_project": get_project,
     "list_experiments": list_experiments,
@@ -437,6 +504,7 @@ _ACTIONS = {
     "meter_instance": meter_instance,
     "meter_claude": meter_claude,
     "record_worker_usage": record_worker_usage,
+    "meter_extension": meter_extension,
 }
 
 
@@ -449,6 +517,10 @@ def handler(event, context):
     try:
         _check_token(event)   # caller→project binding before any read/write
         result = fn(event)
+        if action in _METERING:
+            stopped = enforce_budget(event["project_id"])
+            if stopped:
+                result = {**result, "budget_hard_stop": stopped}
         out = {"ok": True}
         out.update(result)
         return _clean(out)

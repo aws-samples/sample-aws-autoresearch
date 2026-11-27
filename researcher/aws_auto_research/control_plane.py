@@ -33,10 +33,12 @@ class Project(BaseModel):
     # loop fields (stored as strings in the record)
     budget_usd: str = "0"
     spent_usd: str = "0"
-    # metered spend breakdown (spent_usd = claude + researcher + worker; written only by agent_api metering)
+    # metered spend breakdown (spent_usd = claude + researcher + worker + extensions; written only by agent_api metering)
     claude_cost_usd: str = "0"
     researcher_cost_usd: str = "0"
     worker_cost_usd: str = "0"
+    extension_cost_usd: str = "0"        # domain extensions' calls (agent_api meter_extension)
+    extensions: dict = {}                # {name: {status, identity, username, password_param, ...}} (no secrets)
     worker_hourly_usd: str = ""
     model: str = ""
     patience: str = "10"

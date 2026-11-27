@@ -228,13 +228,14 @@ Cost is capped **per user**. Each user has a **budget** — a spendable USD bala
 
 ### Cost metering
 
-A project's `spent_usd` is the sum of three metered totals on the project record, and nothing else:
+A project's `spent_usd` is the sum of the metered totals on the project record, and nothing else:
 
 | total | what | measured by |
 |---|---|---|
 | `claude_cost_usd` | every `claude -p` (research steps, experiment sub-agents, the paper) | `costs.ClaudeCostMeter`: prices the stream-json token usage (cumulative `modelUsage` on `result`; per-message `usage` before that, so a killed/timed-out run is still charged) at Bedrock list price × 1.10 for geographic / in-region inference profiles (`global.` = 1.0; override with `BEDROCK_PRICE_MULTIPLIER`) |
 | `researcher_cost_usd` | the researcher instance's running time | `instance-meter.sh` on the researcher (its own systemd unit, from the EC2 `LaunchTime` of each start — boot included — until shutdown) |
 | `worker_cost_usd` | every worker's running time | `instance-meter.sh` on each worker — covers the provisioning boot, debug loops, timeouts and any worker left running, whoever started it |
+| `extension_cost_usd` | every call the project made to its domain extensions (see below) | the extension's own ledger, polled on the researcher (`extensions.CostPoller`, every 2 min and before each budget check) and reported with `meter_extension`: finished calls at their cost, running calls at their estimate |
 
 Invariants:
 - **Metered in code, never self-reported by an agent.** The totals change only through the `agent_api`
@@ -268,6 +269,45 @@ Invariants:
   `max(90, experiment_timeout_minutes + 30)` minutes (240 on the first, provisioning boot).
 - **Loss bound.** A hard stop loses at most one meter tick (~60 s) of instance time and ≤60 s of
   un-flushed Claude usage. Not metered: EBS storage, S3, CloudWatch, data transfer.
+
+### Domain extensions
+
+A **domain extension** gives the AI Researcher a specialised external system — a robot simulator and its
+training service (robots-sim, the first one), a lab-instrument API, a quantum service — through that system's
+own API and client, with credentials of its own per project. Extensions are installed per deployment and
+enabled per project.
+
+| Part | What it is | Where it runs |
+|---|---|---|
+| Manifest `extension.json` | name, description, cost note, web URL, provider, client, skill, cost source, hooks | `s3://{bucket}/_platform/extensions/<name>/` |
+| Credential provider | creates the project's credentials at creation, removes them at deletion. `cognito-user`: a user `ar-<project>` in the system's Cognito pool (optionally in groups), its password in `/auto-research/projects/<id>/ext/<name>/password` | `create_project`, `delete_project` (`ar_extensions`) |
+| Client | wheels installed into `/opt/ar-ext/<name>` at boot, commands linked onto `/usr/local/bin`, the manifest's `client.env` (with `{username}`, `{password_param}`, `{project_id}` filled in) in the loop's environment and `/etc/profile.d` | researcher (`extensions.install`) |
+| Skill | `skill/SKILL.md` copied into `~/.claude/skills/<name>/`; `CLAUDE.md` tells the agent to read it | researcher |
+| Cost source | a command printing the project's calls with their estimates and costs (robots-sim: `rs costs --json` → `finalUsd`, `activeUsd`) | researcher (`CostPoller`) → `agent_api meter_extension` |
+| Hooks | `health` (command, at boot; the provider also checks a sign-in at creation), `on_stop` (command, when the loop ends: e.g. cancel running calls), `on_budget_exhausted` (default `disable-user`), `on_delete` (default `delete-user`) | commands on the researcher; `*-user` hooks in the control plane |
+
+**Install** (per deployment): build the extension package with the external system's tooling (robots-sim:
+`integrations/autoresearch/build.py`), then `./scripts/deploy.sh -c extensions=<dir>[,<dir>]`. Each package
+becomes a stack `AutoResearchExtension-<name>` (`stacks/extension_stack.py`) that uploads it and grants the
+`create_project`, `delete_project` and `agent_api` Lambdas the provider's permissions on that one resource (for
+`cognito-user`: the admin user actions on that user pool). It references the other stacks only by fixed names
+(the data bucket, three exported role ARNs), so installing or removing it never changes them. Project roles and
+their permissions boundary are unchanged: a project reads its own SSM path and the packages of its extensions.
+
+**Enable** (per project): `auto-research.json` may require extensions (`"extensions": ["robots-sim"]`); the
+Create Project form lists the installed ones (`GET /extensions`), pre-ticks and locks the required ones, and
+refuses a project whose required extension is not installed (so does `create_project`). Provisioning creates
+the credentials after the project's role, records `extensions.<name> = {status, identity, username,
+password_param, health, web_url}` (no secrets) on the project, and rolls them back if provisioning fails.
+
+**Spending cap.** The cap stays in autoresearch; the external system only reports costs. Every call it accepts
+carries an estimate and, when finished, a cost; the poller reports the totals, and `meter_extension` keeps the
+finished part monotonic and replaces the running part (a reservation settles when its call finishes). After
+every metering action `agent_api` checks the budget: once `spent_usd >= budget_usd`, each extension's
+`on_budget_exhausted` hook runs (`disable-user`: the user is disabled and signed out globally), so no new call is
+accepted whatever the agent does. Calls already running finish; their estimates were already counted. A token
+issued before the hard stop stays valid until it expires (Cognito ID tokens: 1 h). Raising a project's budget
+does not re-enable the user; delete and re-create, or `AdminEnableUser` by hand.
 
 ---
 
@@ -375,13 +415,17 @@ Grouped by purpose:
   budget-admin routes `GET /users` (all pool users ⋈ budgets, via Cognito `ListUsers`) and
   `PUT /users/{sub}/budget` (set a user's budget). `create_project` reserves budget and
   `delete_project` refunds it (§ Budgets).
+- **Domain extensions:** `extensions` (`GET /extensions`: the public fields of the installed manifests);
+  `create_project`, `delete_project` and `agent_api` run the extensions' credential providers and hooks
+  (`ar_extensions` in the shared layer; see "Domain extensions").
 - **Reads for the web app:** `get_experiments` (also serves `GET /projects`), `get_workers` (live
   EC2 power state per worker), `get_logs` (CloudWatch tail), and the viewers `wiki_viewer` /
   `code_viewer` (CodeCommit tree/file/commits/diff) / `data_viewer` (S3 tree/presigned-url/preview).
 - **`agent_api` — the agent's only DynamoDB path.** Invoked **directly** by the EC2 instance role
   (`aws lambda invoke`, *not* through API Gateway — it has no route). Owns all read/write on the
   three tables. Actions: `get_project`, `list_experiments`, `get_guidance` (unprocessed only),
-  `create_experiment`, `update_experiment`, `update_project`, `mark_guidance_processed`. Responses
+  `create_experiment`, `update_experiment`, `update_project`, `mark_guidance_processed`, and the metering
+  actions `meter_instance`, `meter_claude`, `record_worker_usage`, `meter_extension`. Responses
   are `{"ok": true, ...}` / `{"ok": false, "error": ...}`.
 
   **Field allowlist:** `update_project` only accepts fields in `PROJECT_WRITABLE = {best_metric,

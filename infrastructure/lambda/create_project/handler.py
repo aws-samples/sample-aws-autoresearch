@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from ar_authz import caller
 from ar_pricing import hourly_rate
+import ar_extensions
 
 dynamodb = boto3.resource("dynamodb")
 codecommit = boto3.client("codecommit")
@@ -72,9 +73,10 @@ def _agent_token_param(project_id):
     return f"/auto-research/projects/{project_id}/agent-token"
 
 
-def _create_project_iam(project_id):
+def _create_project_iam(project_id, extensions=()):
     """Create the per-project role + instance profile (idempotent). Returns the instance-profile name.
-    The inline policy scopes S3/repos/logs/SSM to THIS project; the permissions boundary caps it."""
+    The inline policy scopes S3/repos/logs/SSM to THIS project; the permissions boundary caps it.
+    ``extensions``: the domain extensions the project uses — its boxes may read their client and skill."""
     role_name = _proj_role_name(project_id)
     bucket = DATA_BUCKET
     git_actions = ["codecommit:GitPull", "codecommit:GitPush", "codecommit:GetRepository",
@@ -90,7 +92,8 @@ def _create_project_iam(project_id):
          "Resource": [f"arn:aws:s3:::{bucket}/{project_id}/*"]},
         {"Sid": "S3Platform", "Effect": "Allow", "Action": ["s3:GetObject"],
          "Resource": [f"arn:aws:s3:::{bucket}/_platform/bundle/*",
-                      f"arn:aws:s3:::{bucket}/_platform/settings/{project_id}.json"]},
+                      f"arn:aws:s3:::{bucket}/_platform/settings/{project_id}.json",
+                      *(f"arn:aws:s3:::{bucket}/{ar_extensions.PREFIX}/{n}/*" for n in extensions)]},
         {"Sid": "S3List", "Effect": "Allow", "Action": ["s3:ListBucket"],
          "Resource": [f"arn:aws:s3:::{bucket}"]},
         {"Sid": "CodeCommit", "Effect": "Allow", "Action": git_actions,
@@ -172,6 +175,36 @@ def _slug(s):
     return s[:40].strip("-")
 
 
+GPU_FAMILY_RE = re.compile(r"^(g|p)[0-9]")
+
+
+def _is_gpu(instance_type):
+    """GPU families start with g or p and a digit (g4dn, g5, g6e, p4d, p5); Graviton m8g/c7g do not."""
+    return bool(GPU_FAMILY_RE.match((instance_type or "").split(".")[0]))
+
+
+def _compute(body, config):
+    """(experiment runner, researcher instance type, worker instance type): the form's values, else the
+    project's auto-research.json `compute` block, else the platform defaults."""
+    comp = config.get("compute") if isinstance(config.get("compute"), dict) else {}
+    runner = body.get("experiment_runner") or comp.get("experiment_runner") or "ec2"
+    if runner not in ("ec2", "local"):
+        runner = "ec2"
+    researcher = body.get("researcher_instance_type") or comp.get("researcher_instance_type") or "m8g.large"
+    worker = body.get("worker_instance_type") or comp.get("worker_instance_type") or "g4dn.xlarge"
+    return runner, researcher, worker
+
+
+def _extensions(body, config):
+    """The domain extensions a project uses: those its auto-research.json requires plus those chosen in the form.
+    Each must be installed in this deployment. Returns {name: manifest}."""
+    names = ar_extensions.required_by(config)
+    chosen = body.get("extensions") or []
+    if not isinstance(chosen, list):
+        raise ar_extensions.ExtensionError("'extensions' must be a list of extension names")
+    return {n: ar_extensions.load_manifest(s3, DATA_BUCKET, n) for n in dict.fromkeys([*names, *chosen])}
+
+
 def handler(event, context):
     # Async provisioning self-invoke carries {"_provision": true, "project_id": ...}.
     if isinstance(event, dict) and event.get("_provision"):
@@ -248,6 +281,10 @@ def _fast_api(event, context):
     project_id = _slug(body.get("project_name") or "")
     if not project_id:
         return _resp(400, {"error": "Project name is required (enter it at project creation)"})
+    try:
+        extensions = _extensions(body, config)
+    except ar_extensions.ExtensionError as e:
+        return _resp(400, {"error": f"{e}. Install it in this deployment (see the README's Domain extensions)."})
 
     table = dynamodb.Table(PROJECTS_TABLE)
     if table.get_item(Key={"project_id": project_id}).get("Item"):
@@ -273,12 +310,8 @@ def _fast_api(event, context):
     # Minimal record so the project is visible + cleanable even if provisioning fails.
     # Experiment runner: "ec2" (default) launches GPU workers; "local" runs experiments on the
     # (GPU) researcher itself, so there are zero workers.
-    runner = body.get("experiment_runner", "ec2")
-    if runner not in ("ec2", "local"):
-        runner = "ec2"
+    runner, researcher_type, worker_type = _compute(body, config)
     worker_count = 0 if runner == "local" else max(1, int(body.get("worker_count", 1)))
-    researcher_type = body.get("researcher_instance_type", "m8g.large")
-    worker_type = body.get("worker_instance_type", "g4dn.xlarge")
     # Region-correct on-demand rates, resolved once and cached on the record: every cost the
     # metering actions compute for this project uses them (see agent_api "Cost model").
     researcher_rate, researcher_rate_src = hourly_rate(researcher_type, REGION)
@@ -343,6 +376,10 @@ def _fast_api(event, context):
                 "worker_cost_usd": "0",
                 "s3_data": f"s3://{DATA_BUCKET}/{project_id}",
                 "created_at": now,
+                # domain extensions (ar_extensions): provisioned with the project; no secrets on the record
+                "extensions": {n: {"status": "pending", "display_name": m.get("display_name") or n,
+                                   "web_url": m.get("web_url", "")} for n, m in extensions.items()},
+                "extension_cost_usd": "0",
             },
             ConditionExpression="attribute_not_exists(project_id)",
         )
@@ -368,6 +405,7 @@ def _fast_api(event, context):
 def _provision(project_id):
     table = dynamodb.Table(PROJECTS_TABLE)
     created_instances = []
+    created_extensions = []      # (manifest, record): their credentials are removed again on failure
     try:
         body = json.loads(s3.get_object(Bucket=DATA_BUCKET, Key=f"_provisioning/{project_id}.json")["Body"].read())
         uploaded = _decode_files(body.get("files", []))
@@ -382,13 +420,12 @@ def _provision(project_id):
         config["time_budget_seconds"] = int(body.get("time_budget_seconds", 300))
         model = _regional_model(body.get("model") or "us.anthropic.claude-opus-4-8")
         read_only_files = config.get("read_only_files", [])
-        runner = body.get("experiment_runner", "ec2")
-        if runner not in ("ec2", "local"):
-            runner = "ec2"
-        worker_type = body.get("worker_instance_type", "g4dn.xlarge")
-        researcher_type = body.get("researcher_instance_type", "m8g.large")
-        # Local mode: experiments run on the (GPU) researcher itself — zero workers, and the
-        # researcher boots the Deep Learning AMI (CUDA/drivers) instead of plain Ubuntu.
+        runner, researcher_type, worker_type = _compute(body, config)
+        extensions = _extensions(body, config)
+        if extensions:
+            config["extensions"] = list(extensions)      # the committed spec names every extension it uses
+        # Local mode: experiments run on the researcher itself — zero workers. A GPU researcher boots
+        # the Deep Learning AMI (CUDA/drivers); a CPU one (experiments that call an external API) plain Ubuntu.
         worker_count = 0 if runner == "local" else max(1, int(body.get("worker_count", 1)))
         worker_ebs_gb = int(body.get("worker_ebs_gb", 150))
         code_repo, wiki_repo = f"{project_id}-code", f"{project_id}-wiki"
@@ -405,14 +442,25 @@ def _provision(project_id):
         _commit_wiki_repo(wiki_repo, project_id, readme)
 
         _plog(project_id, "resolving-amis", "Resolving AMIs + minting the project's IAM role and SSH key…")
-        # In local mode the researcher is the GPU compute node → give it the Deep Learning AMI
-        # (CUDA/drivers), like a worker. In ec2 mode it stays the cheap CPU Ubuntu box.
-        researcher_ami, researcher_root = _get_ami("worker" if runner == "local" else "researcher", researcher_type)
+        # A local-mode GPU researcher is the compute node → the Deep Learning AMI (CUDA/drivers), like a
+        # worker. Otherwise (ec2 mode, or a CPU researcher in local mode) the plain Ubuntu box of its arch.
+        researcher_ami, researcher_root = _get_ami(
+            "worker" if runner == "local" and _is_gpu(researcher_type) else "researcher", researcher_type)
         worker_ami, worker_root = _get_ami("worker")
         # Per-project isolation: this project's own role/instance-profile, SSH key, and agent token.
-        profile_name = _create_project_iam(project_id)
+        profile_name = _create_project_iam(project_id, list(extensions))
         project_key_name, ssh_key_param = _create_project_key(project_id)
         agent_token = _create_agent_token(project_id)
+        ext_records = {}
+        for name, doc in extensions.items():
+            _plog(project_id, "extensions", f"Domain extension {name}: creating the project's credentials…")
+            rec = ar_extensions.provision(boto3.session.Session(), project_id, doc, ssm=ssm)
+            ext_records[name] = {**rec, "display_name": doc.get("display_name") or name}
+            created_extensions.append((doc, rec))
+            _plog(project_id, "extensions", f"Domain extension {name}: {rec['provider']} {rec['identity']} — "
+                                            f"health {rec['health']}")
+            if rec["status"] != "ok":
+                raise RuntimeError(f"domain extension {name}: health check failed ({rec['health']})")
         # Local-mode researcher needs a real disk for datasets/checkpoints (like a worker); the ec2
         # CPU researcher only orchestrates, so a small root volume is enough.
         researcher_ebs_gb = worker_ebs_gb if runner == "local" else 40
@@ -450,7 +498,7 @@ def _provision(project_id):
                 "worker_instance_ids=:ws, "
                 "ssh_key_param=:k, agent_token=:tok, instance_profile_name=:ip, worker_key_name=:wk, "
                 "code_repo=:cr, wiki_repo=:wr, report_key=:rk, "
-                "researcher_log_stream=:rls, researcher_log_s3_uri=:rlu, best_metric=:bm"
+                "researcher_log_stream=:rls, researcher_log_s3_uri=:rlu, best_metric=:bm, extensions=:ex"
             ),
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
@@ -459,6 +507,7 @@ def _provision(project_id):
                 ":cr": f"codecommit::{REGION}://{code_repo}", ":wr": f"codecommit::{REGION}://{wiki_repo}",
                 ":rk": "report/status.md", ":rls": f"researcher-{researcher_id}",
                 ":rlu": f"s3://{DATA_BUCKET}/{project_id}/logs/researcher.jsonl", ":bm": "",
+                ":ex": ext_records,
             },
         )
         _plog(project_id, "done",
@@ -473,6 +522,11 @@ def _provision(project_id):
         for iid in created_instances:
             try:
                 ec2.terminate_instances(InstanceIds=[iid])
+            except Exception:  # noqa: BLE001
+                pass
+        for doc, rec in created_extensions:      # and the extensions' credentials
+            try:
+                ar_extensions.run_builtin(boto3.session.Session(), "delete-user", doc, rec)
             except Exception:  # noqa: BLE001
                 pass
         try:
@@ -687,7 +741,7 @@ this file. Read it first.
   budget produces misleading, incomparable numbers.
 - Evaluate with: {config.get('evaluation_command','')}
 - The metric is read from the JSON the evaluation writes (metrics.json: {{"metric": <number>}}).
-
+{_extensions_md(config)}
 ## Python environments
 Bare `python3` is the researcher's own tooling venv (general analysis libs: numpy, pandas, scipy, scikit-learn, matplotlib, pyyaml, requests, ...), NOT the
 project's environment. Run project code and anything needing project dependencies through the
@@ -710,6 +764,16 @@ ledger. Re-read them each iteration; do not rely on chat history.
 
 {brief}
 """
+
+
+def _extensions_md(config):
+    names = config.get("extensions") or []
+    if not names:
+        return ""
+    skills = ", ".join(f"`/{n}`" for n in names)
+    return (f"- Domain extensions: {', '.join(names)}. Read their skills ({skills}) before using them. Their calls "
+            "cost money and count against the project budget (the platform meters them); when the budget is spent "
+            "their credentials are disabled.\n")
 
 
 def _settings(read_only_files):

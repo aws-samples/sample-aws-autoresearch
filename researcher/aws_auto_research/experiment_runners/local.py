@@ -1,4 +1,4 @@
-"""LocalRunner — experiments run on the researcher's own GPU. No worker, no SSH; the GPU's time is
+"""LocalRunner — experiments run on the researcher itself (its GPU, or a CPU researcher driving an external system). No worker, no SSH; its time is
 metered as researcher cost by instance-meter.sh."""
 
 from __future__ import annotations

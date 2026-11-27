@@ -1,14 +1,16 @@
 ---
 name: run-local-experiment
-description: Sub-agent protocol — run and debug ONE experiment locally on THIS researcher instance's own GPU (no separate worker, no start/stop, no SSH), then return a structured result. Used when the project's experiment_runner is "local".
+description: Sub-agent protocol — run and debug ONE experiment locally on THIS researcher instance (its own GPU, or a CPU researcher whose experiments call an external system such as a domain extension), with no separate worker, no start/stop and no SSH, then return a structured result. Used when the project's experiment_runner is "local".
 ---
 
 # Run Local Experiment (sub-agent)
 
 You are the **run-experiment sub-agent**, dispatched by the AI Researcher as a separate `claude -p`
-process. In **local mode** the experiment runs on **this instance's own GPU** — there is no separate
-worker to start/stop and no SSH; you run everything here, in `~/workspace/code`. The GPU is already
-allocated (the researcher instance stays up for the whole research run), so there is no capacity wait.
+process. In **local mode** the experiment runs on **this instance** — there is no separate worker to
+start/stop and no SSH; you run everything here, in `~/workspace/code`. The instance stays up for the
+whole research run, so there is no capacity wait. It is either a GPU instance that trains and evaluates
+itself, or a CPU instance (e.g. Graviton) whose evaluation command drives an external system (a domain
+extension such as robots-sim: see its skill) and mostly waits for it.
 
 You are given (as env vars): `EXP_ID`, `BRANCH` (`experiment/$EXP_ID`), `RESULT_FILE` (where you write
 your final JSON), `$PROJECT_ID`, `$AWS_REGION`, and — from `auto-research.json` — `evaluation_command`,
@@ -59,8 +61,14 @@ value, so treat it as `discard`.
 
 **Give this Bash tool call a long timeout** — `BASH_MAX_TIMEOUT_MS` is set high so a multi-minute run
 is not cut short by the tool. The hard ceiling on the whole experiment is the dispatch-level
-`experiment_timeout_minutes`. Watch for `CUDA out of memory`: if seen, reduce `DEVICE_BATCH_SIZE`
-(and/or `sequence_len`) in `src/train.py` and re-run.
+`experiment_timeout_minutes`. On a GPU instance, watch for `CUDA out of memory`: if seen, reduce
+`DEVICE_BATCH_SIZE` (and/or `sequence_len`) in `src/train.py` and re-run.
+
+**An evaluation that waits on an external system** (a simulation, a training job) can be quiet for a long
+time between progress lines: that is not a hang. Let it run to completion; do not kill and restart it
+(a restart pays for the external job again). Its exit code says what happened: read the project's
+`evaluate.sh` and the extension's skill for the codes it uses (e.g. robots-sim: 75 = an infrastructure
+failure after retries, never a score; record it as `crash` with that note).
 
 ## 4. DEBUG loop
 If the run crashed (no metric), inspect the log:

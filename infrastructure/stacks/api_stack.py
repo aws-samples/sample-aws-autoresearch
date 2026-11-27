@@ -377,6 +377,19 @@ class ApiStack(Stack):
         projects_table.grant_read_write_data(fn_agent_api)
         experiments_table.grant_read_write_data(fn_agent_api)
         guidance_table.grant_read_write_data(fn_agent_api)
+        # domain extensions' manifests (the budget hard stop runs their on_budget_exhausted hook); each
+        # extension's own stack (extension_stack.py) grants these three Lambdas its provider's permissions
+        data_bucket.grant_read(fn_agent_api, "_platform/extensions/*")
+        # exported under fixed names, always: an extension stack imports them, and an uninstalled extension
+        # must never pin an export this stack would otherwise drop
+        for fn_name, fn in (("create-project", fn_create_project), ("delete-project", fn_delete_project),
+                            ("agent-api", fn_agent_api)):
+            CfnOutput(self, f"ExtensionRole{fn_name.title().replace('-', '')}", value=fn.role.role_arn,
+                      export_name=f"AutoResearch-{fn_name}-role-arn")
+
+        # --- extensions: the installed domain extensions (public fields of their manifests) [read] ---
+        fn_extensions = make_fn("extensions")
+        data_bucket.grant_read(fn_extensions, "_platform/extensions/*")
 
         # Region-correct EC2 rates for cost metering (ar_pricing). The Price List API has no
         # resource-level permissions, so "*" is required; it is read-only public pricing data.
@@ -521,6 +534,7 @@ class ApiStack(Stack):
             ("TeamAdmitMember", POST, "/projects/{projectId}/team/members", fn_team),
             ("TeamRemoveMember", DELETE, "/projects/{projectId}/team/members/{sub}", fn_team),
             ("GetMe", GET, "/me", fn_users),
+            ("ListExtensions", GET, "/extensions", fn_extensions),
             ("ListUsers", GET, "/users", fn_users),
             ("SetUserBudget", PUT, "/users/{sub}/budget", fn_users),
             ("GetLogs", GET, "/projects/{projectId}/logs", fn_get_logs),

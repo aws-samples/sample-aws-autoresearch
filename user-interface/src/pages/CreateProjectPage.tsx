@@ -16,9 +16,11 @@ import {
   createProject,
   getMe,
   fmtUsd,
+  listExtensions,
   uploadBootstrapFiles,
   INLINE_UPLOAD_MAX_BYTES,
   type BootstrapFile,
+  type InstalledExtension,
 } from '../services/api';
 
 // Folders larger than INLINE_UPLOAD_MAX_BYTES are uploaded to S3 via a presigned URL (no API Gateway
@@ -46,6 +48,49 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
+// Instance types a local-mode researcher can be: CPU (its experiments call an external system, e.g. a domain
+// extension) or GPU (it trains and evaluates itself).
+const LOCAL_TYPES = [
+  { label: 'm8g.large (Graviton, CPU)', value: 'm8g.large' },
+  { label: 'm8g.xlarge (Graviton, CPU)', value: 'm8g.xlarge' },
+  { label: 'm7i.large (x86, CPU)', value: 'm7i.large' },
+  { label: 'g4dn.xlarge (T4 16GB)', value: 'g4dn.xlarge' },
+  { label: 'g5.xlarge (A10G 24GB)', value: 'g5.xlarge' },
+  { label: 'g6.xlarge (L4 24GB)', value: 'g6.xlarge' },
+  { label: 'p5.4xlarge (1× H100)', value: 'p5.4xlarge' },
+];
+const RESEARCHER_TYPES = [
+  { label: 'm8g.large (Graviton)', value: 'm8g.large' },
+  { label: 'm9g.large (Graviton)', value: 'm9g.large' },
+  { label: 'm7i.large (x86)', value: 'm7i.large' },
+  { label: 'm7i.xlarge (x86)', value: 'm7i.xlarge' },
+  { label: 't3.large (x86)', value: 't3.large' },
+];
+
+function isGpu(type: string): boolean {
+  return /^(g|p)[0-9]/.test(type);
+}
+
+function option(list: { label: string; value: string }[], value: string) {
+  return list.find((o) => o.value === value) ?? { label: value, value };
+}
+
+// What the uploaded auto-research.json asks of the form: its compute defaults and required extensions.
+interface ProjectSpec {
+  compute?: { experiment_runner?: string; researcher_instance_type?: string; worker_instance_type?: string };
+  extensions?: string[];
+}
+
+function readSpec(files: BootstrapFile[]): ProjectSpec {
+  const f = files.find((x) => x.path === 'auto-research.json');
+  if (!f) return {};
+  try {
+    return JSON.parse(atob(f.content_b64)) as ProjectSpec;
+  } catch {
+    return {};
+  }
+}
+
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -61,6 +106,9 @@ export default function CreateProjectPage() {
   const [workerCount, setWorkerCount] = useState('1');
   const [execMode, setExecMode] = useState({ label: 'EC2 GPU workers (default)', value: 'ec2' });
   const [localGpuType, setLocalGpuType] = useState({ label: 'g4dn.xlarge (T4 16GB)', value: 'g4dn.xlarge' });
+  const [installed, setInstalled] = useState<InstalledExtension[] | null>(null);
+  const [required, setRequired] = useState<string[]>([]);
+  const [chosen, setChosen] = useState<string[]>([]);
   const [model, setModel] = useState({ label: 'Claude Opus 4.8', value: 'us.anthropic.claude-opus-4-8' });
   const [budget, setBudget] = useState('30');
   const [availBudget, setAvailBudget] = useState<number | null>(null); // caller's available USD budget
@@ -121,6 +169,20 @@ export default function CreateProjectPage() {
         return;
       }
 
+      // the project's own defaults: its compute block and the extensions it needs
+      const spec = readSpec(collected);
+      const comp = spec.compute ?? {};
+      if (comp.experiment_runner === 'local') {
+        setExecMode({ label: 'Local (run on the researcher)', value: 'local' });
+        if (comp.researcher_instance_type) setLocalGpuType(option(LOCAL_TYPES, comp.researcher_instance_type));
+      } else if (comp.experiment_runner === 'ec2') {
+        setExecMode({ label: 'EC2 GPU workers (default)', value: 'ec2' });
+        if (comp.researcher_instance_type) setResearcherType(option(RESEARCHER_TYPES, comp.researcher_instance_type));
+      }
+      if (comp.worker_instance_type) setWorkerType({ label: comp.worker_instance_type, value: comp.worker_instance_type });
+      const req = Array.isArray(spec.extensions) ? spec.extensions.filter((x) => typeof x === 'string') : [];
+      setRequired(req);
+      setChosen((c) => Array.from(new Set([...c, ...req])));
       setFiles(collected);
       setTotalBytes(total);
       setFolderName(topSegment);
@@ -134,6 +196,7 @@ export default function CreateProjectPage() {
 
   useEffect(() => {
     getMe().then((me) => setAvailBudget(me.budget)).catch(() => setAvailBudget(null));
+    listExtensions().then(setInstalled).catch(() => setInstalled([]));
   }, []);
 
   const projectId = slugify(projectName);
@@ -142,8 +205,9 @@ export default function CreateProjectPage() {
   // Project budget must be > $1 and cannot exceed the caller's available budget.
   const budgetValid =
     Number.isFinite(budgetNum) && budgetNum > 1 && (availBudget === null || budgetNum <= availBudget);
+  const missing = installed === null ? [] : required.filter((r) => !installed.some((e) => e.name === r));
   const canSubmit =
-    files.length > 0 && !error && !reading && projectId.length > 0 && budgetValid &&
+    files.length > 0 && !error && !reading && projectId.length > 0 && budgetValid && missing.length === 0 &&
     (runLocally || parseInt(workerCount, 10) > 0);
 
   const handleSubmit = async () => {
@@ -167,6 +231,7 @@ export default function CreateProjectPage() {
         experiment_timeout_minutes: parseInt(experimentTimeoutMin, 10),
         auto_start: autoStart,
         write_paper: writePaper,
+        extensions: chosen,
         ...(large ? { upload_id } : { files }),
       });
       navigate(`/projects/${result.project_id}`);
@@ -213,28 +278,25 @@ export default function CreateProjectPage() {
         <Container header={<Header variant="h2">Compute</Header>}>
           <SpaceBetween size="m">
             <FormField label="How experiments run" description={runLocally
-              ? 'Local: the researcher IS a GPU instance and runs experiments on itself (zero workers). The GPU is held for the whole run — no per-experiment capacity waits — but you pay for it while it sits idle between experiments (agent think time). Best when worker GPU capacity is scarce.'
+              ? 'Local: the researcher runs experiments on itself (zero workers). A GPU researcher trains and evaluates on its own GPU, held for the whole run (no per-experiment capacity waits, but paid while idle). A CPU researcher suits experiments that call an external system, such as a domain extension.'
               : 'EC2 workers: a cheap CPU researcher orchestrates, and each experiment runs on a separate GPU worker that is powered on only for that run (pay-per-use, parallel across workers).'}>
               <Select
                 selectedOption={execMode}
                 onChange={({ detail }) => setExecMode(detail.selectedOption as typeof execMode)}
                 options={[
                   { label: 'EC2 GPU workers (default)', value: 'ec2' },
-                  { label: 'Local (run on the GPU researcher)', value: 'local' },
+                  { label: 'Local (run on the researcher)', value: 'local' },
                 ]}
               />
             </FormField>
             {runLocally ? (
-              <FormField label="Researcher GPU instance" description="The single GPU instance that runs both the researcher loop and its experiments. It stays on for the whole session.">
+              <FormField label="Researcher instance" description={isGpu(localGpuType.value)
+                ? 'A GPU instance that runs both the researcher loop and its experiments. It stays on for the whole session.'
+                : 'A CPU instance that runs the researcher loop and its experiments, which wait on an external system (no GPU here). It stays on for the whole session.'}>
                 <Select
                   selectedOption={localGpuType}
                   onChange={({ detail }) => setLocalGpuType(detail.selectedOption as typeof localGpuType)}
-                  options={[
-                    { label: 'g4dn.xlarge (T4 16GB)', value: 'g4dn.xlarge' },
-                    { label: 'g5.xlarge (A10G 24GB)', value: 'g5.xlarge' },
-                    { label: 'g6.xlarge (L4 24GB)', value: 'g6.xlarge' },
-                    { label: 'p5.4xlarge (1× H100)', value: 'p5.4xlarge' },
-                  ]}
+                  options={LOCAL_TYPES}
                 />
               </FormField>
             ) : (
@@ -243,13 +305,7 @@ export default function CreateProjectPage() {
                   <Select
                     selectedOption={researcherType}
                     onChange={({ detail }) => setResearcherType(detail.selectedOption as typeof researcherType)}
-                    options={[
-                      { label: 'm8g.large (Graviton)', value: 'm8g.large' },
-                      { label: 'm9g.large (Graviton)', value: 'm9g.large' },
-                      { label: 'm7i.large (x86)', value: 'm7i.large' },
-                      { label: 'm7i.xlarge (x86)', value: 'm7i.xlarge' },
-                      { label: 't3.large (x86)', value: 't3.large' },
-                    ]}
+                    options={RESEARCHER_TYPES}
                   />
                 </FormField>
                 <FormField label="Worker instance type" description="GPU worker, STOPPED by default; started only while an experiment runs.">
@@ -283,8 +339,8 @@ export default function CreateProjectPage() {
               label="Maximum budget (USD)"
               description={
                 availBudget === null
-                  ? 'Cap on total GPU + Bedrock spend. Reserved from your budget at creation.'
-                  : `Cap on total GPU + Bedrock spend. Reserved from your budget at creation. Your available budget: ${fmtUsd(availBudget)}.`
+                  ? 'Cap on total GPU + Bedrock + domain-extension spend. Reserved from your budget at creation.'
+                  : `Cap on total GPU + Bedrock + domain-extension spend. Reserved from your budget at creation. Your available budget: ${fmtUsd(availBudget)}.`
               }
               errorText={
                 budget && !budgetValid
@@ -317,6 +373,36 @@ export default function CreateProjectPage() {
                 IEEE-conference PDF. You can also toggle this later from the project's guidance box.
               </Checkbox>
             </FormField>
+          </SpaceBetween>
+        </Container>
+
+        <Container header={<Header variant="h2" description="Specialised external systems the AI Researcher can use, installed in this deployment. Each enabled one gets its own credentials for this project; its calls count against the project's budget.">Domain extensions</Header>}>
+          <SpaceBetween size="s">
+            {missing.length > 0 && (
+              <Alert type="error">
+                This project requires {missing.join(', ')}, which {missing.length === 1 ? 'is' : 'are'} not installed in
+                this deployment. Install it first (README: Domain extensions).
+              </Alert>
+            )}
+            {installed === null ? (
+              <StatusIndicator type="loading">Loading…</StatusIndicator>
+            ) : installed.length === 0 ? (
+              <Box color="text-status-inactive">No domain extensions are installed in this deployment.</Box>
+            ) : (
+              installed.map((e) => (
+                <Checkbox
+                  key={e.name}
+                  checked={chosen.includes(e.name)}
+                  disabled={required.includes(e.name)}
+                  onChange={({ detail }) =>
+                    setChosen((c) => (detail.checked ? [...c, e.name] : c.filter((x) => x !== e.name)))
+                  }
+                  description={`${e.description}${e.cost_note ? ` Cost: ${e.cost_note}` : ''}${required.includes(e.name) ? ' (required by this project)' : ''}`}
+                >
+                  {e.display_name}
+                </Checkbox>
+              ))
+            )}
           </SpaceBetween>
         </Container>
 

@@ -20,6 +20,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from decimal import Decimal
 from ar_authz import caller, is_owner, forbidden
+import ar_extensions
 
 dynamodb = boto3.resource("dynamodb")
 
@@ -97,6 +98,20 @@ def _teardown(project_id):
                 removed.append(f"refunded ${refund}")
         except Exception as e:  # noqa: BLE001
             removed.append(f"refund: skipped ({e})")
+
+    # 0. Domain extensions: remove the project's credentials in each external system (their on_delete hook).
+    for name, rec in (project.get("extensions") or {}).items():
+        try:
+            doc = ar_extensions.load_manifest(s3, DATA_BUCKET, name)
+            done = ar_extensions.run_builtin(boto3.session.Session(),
+                                             ar_extensions.hook_for(doc, "on_delete", "delete-user"), doc, rec)
+            removed.append(f"extension {name}: {done}")
+        except Exception as e:  # noqa: BLE001 - an uninstalled extension: nothing left to call
+            removed.append(f"extension {name}: skipped ({e})")
+        try:
+            ssm.delete_parameter(Name=ar_extensions.password_param(project_id, name))
+        except Exception:  # noqa: BLE001
+            pass
 
     # 1. Terminate all instances tagged for this project (covers partial/failed provisioning too).
     try:

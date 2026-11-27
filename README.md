@@ -88,7 +88,9 @@ a separate GPU **worker** that is powered on only for that run (`experiment_runn
 tick **"Run experiments locally"** to make the researcher itself a GPU instance that runs the
 experiments (`experiment_runner="local"`, zero workers): the GPU is held for the whole session — no
 per-experiment capacity waits — at the cost of paying for it while it sits idle between experiments.
-Each mode maps to a sub-agent skill (`run-ec2-experiment` / `run-local-experiment`).
+A local researcher can also be a CPU instance (e.g. `m8g.large`): that suits projects whose evaluation
+calls an external system (a domain extension, below) and waits for it. Each mode maps to a sub-agent
+skill (`run-ec2-experiment` / `run-local-experiment`).
 
 | Field | Meaning |
 |---|---|
@@ -97,6 +99,8 @@ Each mode maps to a sub-agent skill (`run-ec2-experiment` / `run-local-experimen
 | `read_only_files` | Files the agent must not edit → become `.claude/settings.json` deny-rules. |
 | `evaluation_command` | How to run one experiment. It must write a JSON result file (`metrics.json`) — see the result contract below — and typically also redirects console output to `run.log`. |
 | `metric_name` / `metric_direction` | The objective and whether `lower_is_better` / `higher_is_better`. |
+| `compute` (optional) | Defaults for the form's compute fields: `{"experiment_runner": "local", "researcher_instance_type": "m8g.large"}` (also `worker_instance_type`). |
+| `extensions` (optional) | Domain extensions the project requires, e.g. `["robots-sim"]`: the form enables them and refuses the project if one is not installed. |
 
 #### The result contract (`metrics.json`)
 
@@ -252,6 +256,26 @@ the user from step 2.
    sub-agent logs.
 5. Press **Stop** to end the session — this stops the researcher **and** the GPU worker, so nothing
    keeps spending.
+
+### Domain extensions (optional)
+
+A domain extension lets the AI Researcher use a specialised external system through its own API, as its
+own per-project user, with every call's cost counted in the project budget (design.md, "Domain
+extensions"). Install one per deployment from the package the external system builds, e.g. robots-sim:
+
+```bash
+# in the robots-sim repository (deployed in the same account and region):
+python3 integrations/autoresearch/build.py --profile <profile> --region "$AWS_REGION" --out /tmp/ext
+# here:
+./scripts/deploy.sh -c extensions=/tmp/ext/robots-sim
+```
+
+Pass the same `-c extensions=...` on every later `deploy.sh`. The web app's **Extensions** page lists
+what is installed; a project enables extensions in the *Domain extensions* section of the Create form
+(those its `auto-research.json` requires are ticked and locked). The project page shows each
+extension's status, the identity it runs as, and its share of the spend. When the project's spend
+reaches its budget, the extension's credentials are disabled. To uninstall, delete its
+`AutoResearchExtension-<name>` stack and stop passing it.
 
 ### 5. Teardown
 

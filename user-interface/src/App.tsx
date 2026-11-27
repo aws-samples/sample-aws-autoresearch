@@ -18,6 +18,7 @@ import CodePage from './pages/CodePage';
 import DataPage from './pages/DataPage';
 import PaperView from './pages/PaperView';
 import TeamPage from './pages/TeamPage';
+import ExtensionsPage from './pages/ExtensionsPage';
 
 function Shell() {
   const navigate = useNavigate();
@@ -37,6 +38,7 @@ function Shell() {
       <TopNavigation
         identity={{ title: 'Auto-Research', href: '/' }}
         utilities={[
+          { type: 'button', text: 'Extensions', onClick: () => navigate('/extensions') },
           // Username → the User page (My Budget, My Projects, and budget admin if applicable).
           { type: 'button', iconName: 'user-profile', text: username || 'Account', onClick: () => navigate('/user') },
           { type: 'button', text: 'Sign out', onClick: handleSignOut },
@@ -49,6 +51,7 @@ function Shell() {
           <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/user" element={<UserPage />} />
+            <Route path="/extensions" element={<ExtensionsPage />} />
             <Route path="/projects/new" element={<CreateProjectPage />} />
             <Route path="/projects/:projectId" element={<ProjectLayout />}>
               <Route index element={<StreamView />} />
