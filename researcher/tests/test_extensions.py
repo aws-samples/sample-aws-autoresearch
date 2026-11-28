@@ -48,6 +48,7 @@ def test_install_fetches_installs_links_and_places_the_skill(tmp_path, monkeypat
     flat = [" ".join(c) for c in calls]
     assert any("s3://bkt/_platform/extensions/robots-sim/" in c for c in flat)
     assert any(c.startswith(f"{tmp_path}/opt/robots-sim/venv/bin/pip install") and c.endswith(".whl") for c in flat)
+    assert any("--force-reinstall --no-deps" in c for c in flat)       # a rebuilt package keeps its version
     assert any(c.startswith(f"cp -r {tmp_path}/opt/robots-sim/src/skill/ {tmp_path}/home/.claude/skills/robots-sim") for c in flat)
     # a missing extension (its stack was removed) does not stop the boot
     assert ext.install("gone", "bkt", "eu-west-2", str(tmp_path / "home"), "ubuntu", print,

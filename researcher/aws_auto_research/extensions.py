@@ -67,7 +67,9 @@ def install(name: str, bucket: str, region: str, home: str, user: str, log: Call
     if wheels:
         if not os.path.exists(f"{venv}/bin/python"):
             run(["python3", "-m", "venv", venv])
-        rc = run([f"{venv}/bin/pip", "install", "--quiet", "--upgrade", *wheels]).returncode
+        # the wheels' dependencies, then the wheels themselves again: a rebuilt package often keeps its version
+        rc = run([f"{venv}/bin/pip", "install", "--quiet", *wheels]).returncode or \
+            run([f"{venv}/bin/pip", "install", "--quiet", "--force-reinstall", "--no-deps", *wheels]).returncode
         log(f"[ext] {name}: client {'installed' if rc == 0 else 'FAILED to install'} ({len(wheels)} wheels)")
         for cmd in client.get("commands") or []:
             if os.path.exists(f"{venv}/bin/{cmd}"):
